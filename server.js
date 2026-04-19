@@ -9,14 +9,8 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ===== USERS =====
-const USERS = {
-  admin: { password: "1234", role: "admin" },
-  user: { password: "1234", role: "public" }
-};
-
-// ===== SESSION (simple) =====
-let currentRole = null;
+// ===== ROLE =====
+let currentRole = "";
 
 // ===== MONGODB =====
 mongoose.connect(process.env.MONGO_URL)
@@ -56,7 +50,6 @@ client.on('message', async (topic, message) => {
     data.time = new Date();
 
     latestData[data.node] = data;
-
     await Data.create(data);
 
   } catch (err) {
@@ -64,26 +57,19 @@ client.on('message', async (topic, message) => {
   }
 });
 
-// ===== LOGIN =====
-app.post('/login', (req, res) => {
-  const { username, password } = req.body;
-
-  if (USERS[username] && USERS[username].password === password) {
-    currentRole = USERS[username].role;
-    res.json({ success: true, role: currentRole });
-  } else {
-    res.json({ success: false });
-  }
+// ===== ROLE SELECT =====
+app.post('/setRole', (req, res) => {
+  currentRole = req.body.role;
+  res.json({ success: true });
 });
 
-// ===== API =====
+// ===== FILTER DATA =====
 app.get('/api/data', (req, res) => {
   const now = new Date();
   let filtered = {};
 
   for (let node in latestData) {
     let d = latestData[node];
-
     if ((now - new Date(d.time)) < 120000) {
       filtered[node] = d;
     }
@@ -92,38 +78,31 @@ app.get('/api/data', (req, res) => {
   res.json(filtered);
 });
 
-// ===== DELETE NODE (ADMIN ONLY) =====
+// ===== ADMIN APIs =====
+app.get('/reset', async (req, res) => {
+  if (currentRole !== "admin") return res.send("Unauthorized");
+  await Data.deleteMany({});
+  latestData = {};
+  res.send("Cleared");
+});
+
 app.get('/delete/:node', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
 
-  const node = req.params.node;
-
-  await Data.deleteMany({ node: node });
+  let node = req.params.node;
+  await Data.deleteMany({ node });
   delete latestData[node];
 
-  res.send("Node deleted");
+  res.send("Deleted");
 });
 
-// ===== RESET ALL =====
-app.get('/reset', async (req, res) => {
-  if (currentRole !== "admin") return res.send("Unauthorized");
-
-  await Data.deleteMany({});
-  latestData = {};
-
-  res.send("Database cleared");
-});
-
-// ===== CSV =====
 app.get('/download', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
 
   const data = await Data.find().sort({ time: 1 });
 
   const formatted = data.map(d => ({
-    Time: new Date(d.time).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata"
-    }),
+    Time: new Date(d.time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
     Node: d.node,
     Temperature: d.temp,
     Humidity: d.hum,
@@ -140,7 +119,7 @@ app.get('/download', async (req, res) => {
 
 // ===== UI =====
 app.get('/', (req, res) => {
-  res.send(`
+res.send(`
 <!DOCTYPE html>
 <html>
 <head>
@@ -154,10 +133,58 @@ body {
   text-align: center;
 }
 
+button {
+  padding: 10px;
+  margin: 10px;
+  background: #22c55e;
+  border: none;
+  color: white;
+  cursor: pointer;
+}
+
+.container {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 20px;
+}
+
+.card {
+  background: #1e293b;
+  padding: 20px;
+  border-radius: 15px;
+  width: 250px;
+}
+
+.circle {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: auto;
+}
+
+.inner {
+  width: 90px;
+  height: 90px;
+  border-radius: 50%;
+  background: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.weather {
+  font-size: 40px;
+}
+
 table {
   margin: auto;
-  border-collapse: collapse;
   width: 80%;
+  border-collapse: collapse;
 }
 
 th, td {
@@ -165,122 +192,116 @@ th, td {
   padding: 10px;
 }
 
-th {
-  background: #22c55e;
-}
-
-button {
-  padding: 6px 10px;
-  margin: 5px;
-  border: none;
-  background: #22c55e;
-  color: white;
-  cursor: pointer;
-}
 </style>
-
 </head>
 
 <body>
 
-<div id="loginBox">
-  <h2>Login</h2>
-  <input id="u" placeholder="Username"><br>
-  <input id="p" type="password" placeholder="Password"><br>
-  <button onclick="login()">Login</button>
+<h1>🌍 IoT Dashboard</h1>
+
+<div id="roleSelect">
+  <button onclick="setRole('admin')">👑 Admin</button>
+  <button onclick="setRole('user')">👤 User</button>
 </div>
 
-<div id="dash" style="display:none;">
-  <h1>🌍 Pollution Dashboard</h1>
+<div id="userUI" style="display:none;">
+  <h2>User Dashboard</h2>
+  <div class="container" id="cards"></div>
+</div>
 
-  <div id="adminControls" style="display:none;">
-    <button onclick="download()">📥 Download CSV</button>
-    <button onclick="reset()">🗑 Reset All</button>
-  </div>
+<div id="adminUI" style="display:none;">
+  <h2>Admin Dashboard</h2>
+  <button onclick="download()">Download CSV</button>
+  <button onclick="reset()">Reset DB</button>
 
   <table>
     <thead>
       <tr>
         <th>Node</th>
         <th>Temp</th>
-        <th>Humidity</th>
+        <th>Hum</th>
         <th>Gas</th>
         <th>Time</th>
-        <th id="actionHead">Action</th>
+        <th>Action</th>
       </tr>
     </thead>
-    <tbody id="data"></tbody>
+    <tbody id="table"></tbody>
   </table>
 </div>
 
 <script>
 
-let role = "";
+function getWeather(t){
+  if(t>35) return "☀️";
+  if(t>25) return "⛅";
+  if(t>15) return "☁️";
+  return "🌧";
+}
 
-async function login(){
-  let res = await fetch('/login',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({username:u.value,password:p.value})
-  });
+async function setRole(r){
+  await fetch('/setRole',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({role:r})});
+  roleSelect.style.display="none";
 
-  let d = await res.json();
-
-  if(d.success){
-    role = d.role;
-
-    loginBox.style.display='none';
-    dash.style.display='block';
-
-    if(role === "admin"){
-      adminControls.style.display='block';
-    } else {
-      actionHead.style.display='none';
-    }
-
-    loadData();
+  if(r==="user"){
+    userUI.style.display="block";
+    loadUser();
   } else {
-    alert("Wrong login");
+    adminUI.style.display="block";
+    loadAdmin();
   }
 }
 
-async function loadData(){
+async function loadUser(){
   let res = await fetch('/api/data');
   let data = await res.json();
 
-  let html = "";
+  let html="";
+  for(let n in data){
+    let d=data[n];
+    let deg=(d.temp/50)*360;
 
-  for(let node in data){
-    let d = data[node];
+    html+=\`
+    <div class="card">
+      <h3>\${d.node}</h3>
+      <div class="weather">\${getWeather(d.temp)}</div>
+      <div class="circle" style="--deg:\${deg}deg">
+        <div class="inner">\${d.temp}°C</div>
+      </div>
+      <p>💧 \${d.hum}%</p>
+      <p>💨 \${d.gas}</p>
+    </div>\`;
+  }
 
-    html += \`
+  cards.innerHTML=html;
+  setTimeout(loadUser,2000);
+}
+
+async function loadAdmin(){
+  let res = await fetch('/api/data');
+  let data = await res.json();
+
+  let html="";
+  for(let n in data){
+    let d=data[n];
+
+    html+=\`
     <tr>
       <td>\${d.node}</td>
       <td>\${d.temp}</td>
       <td>\${d.hum}</td>
       <td>\${d.gas}</td>
       <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
-      \${role==="admin" ? \`<td><button onclick="del('\${d.node}')">Clear</button></td>\` : ""}
-    </tr>
-    \`;
+      <td><button onclick="del('\${d.node}')">Clear</button></td>
+    </tr>\`;
   }
 
-  document.getElementById("data").innerHTML = html;
-
-  setTimeout(loadData, 3000);
+  table.innerHTML=html;
+  setTimeout(loadAdmin,3000);
 }
 
-function download(){
-  window.location='/download';
-}
-
-function reset(){
-  fetch('/reset').then(()=>alert("All Data Cleared"));
-}
-
-function del(node){
-  fetch('/delete/'+node).then(()=>alert(node+" cleared"));
-}
+function reset(){ fetch('/reset'); }
+function del(n){ fetch('/delete/'+n); }
+function download(){ window.location='/download'; }
 
 </script>
 
@@ -291,5 +312,5 @@ function del(node){
 
 // ===== START =====
 app.listen(PORT, () => {
-  console.log("🚀 Server running on port", PORT);
+  console.log("🚀 Running on port", PORT);
 });
