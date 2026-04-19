@@ -7,13 +7,12 @@ const { Parser } = require('json2csv');
 const app = express();
 app.use(bodyParser.json());
 
-// ===== PORT (IMPORTANT FOR RENDER) =====
 const PORT = process.env.PORT || 3000;
 
 // ===== LOGIN =====
 const USER = { username: "admin", password: "1234" };
 
-// ===== MONGODB (ENV VARIABLE) =====
+// ===== MONGODB =====
 mongoose.connect(process.env.MONGO_URL)
 .then(() => console.log("✅ MongoDB Connected"))
 .catch(err => console.log("❌ MongoDB Error:", err));
@@ -27,13 +26,15 @@ const Data = mongoose.model("Data", {
   time: { type: Date, default: Date.now }
 });
 
-// ===== REALTIME STORE =====
+// ===== STORE =====
 let latestData = {};
 
-// ===== MQTT CONNECTION =====
+// ===== MQTT (FIXED & STABLE) =====
 const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hivemq.cloud', {
   username: 'climate',
-  password: 'Climate@2'
+  password: 'Climate@2',
+  reconnectPeriod: 2000,
+  connectTimeout: 5000
 });
 
 client.on('connect', () => {
@@ -41,9 +42,15 @@ client.on('connect', () => {
   client.subscribe("pollution/#");
 });
 
+client.on('error', (err) => {
+  console.log("❌ MQTT Error:", err.message);
+});
+
 client.on('message', async (topic, message) => {
   try {
     let text = message.toString();
+
+    console.log("📩 RAW:", text); // DEBUG
 
     if (!text.startsWith("{")) return;
 
@@ -56,28 +63,30 @@ client.on('message', async (topic, message) => {
     console.log("📥 Saved:", data);
 
   } catch (err) {
-    console.log("❌ Error:", err.message);
+    console.log("❌ Parse Error:", err.message);
   }
 });
 
-// ===== LOGIN API =====
+// ===== LOGIN =====
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
   res.json({ success: username === USER.username && password === USER.password });
 });
 
-// ===== REALTIME API =====
+// ===== API =====
 app.get('/api/data', (req, res) => {
   res.json(latestData);
 });
 
-// ===== CSV DOWNLOAD =====
+// ===== CSV (INDIA TIME FIXED) =====
 app.get('/download', async (req, res) => {
   try {
     const data = await Data.find().sort({ time: 1 });
 
     const formatted = data.map(d => ({
-      Time: new Date(d.time).toLocaleString(),
+      Time: new Date(d.time).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata"
+      }),
       Node: d.node,
       Temperature: d.temp,
       Humidity: d.hum,
@@ -157,7 +166,6 @@ button {
   box-shadow: 0 0 10px black;
 }
 
-/* circle */
 .circle {
   width: 120px;
   height: 120px;
@@ -261,6 +269,8 @@ async function loadData(){
 
       <p>💧 Humidity: \${d.hum}%</p>
       <p>💨 Gas: \${d.gas}</p>
+      <p>🕒 \${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</p>
+
       \${d.gas > 2000 ? "<p style='color:red;'>⚠ Gas Alert</p>" : ""}
     </div>
     \`;
@@ -282,7 +292,7 @@ function download(){
 `);
 });
 
-// ===== START SERVER =====
+// ===== START =====
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
 });
