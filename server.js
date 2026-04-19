@@ -9,13 +9,19 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ===== LOGIN =====
-const USER = { username: "admin", password: "1234" };
+// ===== USERS =====
+const USERS = {
+  admin: { password: "1234", role: "admin" },
+  user: { password: "1234", role: "public" }
+};
+
+// ===== SESSION (simple) =====
+let currentRole = null;
 
 // ===== MONGODB =====
 mongoose.connect(process.env.MONGO_URL)
 .then(() => console.log("✅ MongoDB Connected"))
-.catch(err => console.log("❌ MongoDB Error:", err));
+.catch(err => console.log(err));
 
 // ===== MODEL =====
 const Data = mongoose.model("Data", {
@@ -29,12 +35,11 @@ const Data = mongoose.model("Data", {
 // ===== STORE =====
 let latestData = {};
 
-// ===== MQTT (FIXED & STABLE) =====
+// ===== MQTT =====
 const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hivemq.cloud', {
   username: 'climate',
   password: 'Climate@2',
-  reconnectPeriod: 2000,
-  connectTimeout: 5000
+  reconnectPeriod: 2000
 });
 
 client.on('connect', () => {
@@ -42,70 +47,95 @@ client.on('connect', () => {
   client.subscribe("pollution/#");
 });
 
-client.on('error', (err) => {
-  console.log("❌ MQTT Error:", err.message);
-});
-
 client.on('message', async (topic, message) => {
   try {
     let text = message.toString();
-
-    console.log("📩 RAW:", text); // DEBUG
-
     if (!text.startsWith("{")) return;
 
     const data = JSON.parse(text);
+    data.time = new Date();
 
     latestData[data.node] = data;
 
     await Data.create(data);
 
-    console.log("📥 Saved:", data);
-
   } catch (err) {
-    console.log("❌ Parse Error:", err.message);
+    console.log(err.message);
   }
 });
 
 // ===== LOGIN =====
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
-  res.json({ success: username === USER.username && password === USER.password });
+
+  if (USERS[username] && USERS[username].password === password) {
+    currentRole = USERS[username].role;
+    res.json({ success: true, role: currentRole });
+  } else {
+    res.json({ success: false });
+  }
 });
 
 // ===== API =====
 app.get('/api/data', (req, res) => {
-  res.json(latestData);
+  const now = new Date();
+  let filtered = {};
+
+  for (let node in latestData) {
+    let d = latestData[node];
+
+    if ((now - new Date(d.time)) < 120000) {
+      filtered[node] = d;
+    }
+  }
+
+  res.json(filtered);
 });
 
-// ===== CSV (INDIA TIME FIXED) =====
+// ===== DELETE NODE (ADMIN ONLY) =====
+app.get('/delete/:node', async (req, res) => {
+  if (currentRole !== "admin") return res.send("Unauthorized");
+
+  const node = req.params.node;
+
+  await Data.deleteMany({ node: node });
+  delete latestData[node];
+
+  res.send("Node deleted");
+});
+
+// ===== RESET ALL =====
+app.get('/reset', async (req, res) => {
+  if (currentRole !== "admin") return res.send("Unauthorized");
+
+  await Data.deleteMany({});
+  latestData = {};
+
+  res.send("Database cleared");
+});
+
+// ===== CSV =====
 app.get('/download', async (req, res) => {
-  try {
-    const data = await Data.find().sort({ time: 1 });
+  if (currentRole !== "admin") return res.send("Unauthorized");
 
-    const formatted = data.map(d => ({
-      Time: new Date(d.time).toLocaleString("en-IN", {
-        timeZone: "Asia/Kolkata"
-      }),
-      Node: d.node,
-      Temperature: d.temp,
-      Humidity: d.hum,
-      Gas: d.gas
-    }));
+  const data = await Data.find().sort({ time: 1 });
 
-    const parser = new Parser({
-      fields: ["Time", "Node", "Temperature", "Humidity", "Gas"]
-    });
+  const formatted = data.map(d => ({
+    Time: new Date(d.time).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata"
+    }),
+    Node: d.node,
+    Temperature: d.temp,
+    Humidity: d.hum,
+    Gas: d.gas
+  }));
 
-    const csv = parser.parse(formatted);
+  const parser = new Parser();
+  const csv = parser.parse(formatted);
 
-    res.header('Content-Type', 'text/csv');
-    res.attachment('iot_data.csv');
-    res.send(csv);
-
-  } catch (err) {
-    res.status(500).send("Error generating CSV");
-  }
+  res.header('Content-Type', 'text/csv');
+  res.attachment('iot_data.csv');
+  res.send(csv);
 });
 
 // ===== UI =====
@@ -118,84 +148,34 @@ app.get('/', (req, res) => {
 
 <style>
 body {
-  margin: 0;
   font-family: Arial;
   background: #0f172a;
   color: white;
-}
-
-.login {
   text-align: center;
-  margin-top: 100px;
 }
 
-input {
+table {
+  margin: auto;
+  border-collapse: collapse;
+  width: 80%;
+}
+
+th, td {
+  border: 1px solid white;
   padding: 10px;
-  margin: 10px;
-  border-radius: 5px;
-  border: none;
+}
+
+th {
+  background: #22c55e;
 }
 
 button {
-  padding: 10px 20px;
-  background: #22c55e;
+  padding: 6px 10px;
+  margin: 5px;
   border: none;
+  background: #22c55e;
   color: white;
-  border-radius: 5px;
   cursor: pointer;
-}
-
-.dashboard {
-  display: none;
-  padding: 20px;
-}
-
-.container {
-  display: flex;
-  gap: 20px;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-
-.card {
-  background: #1e293b;
-  padding: 20px;
-  border-radius: 15px;
-  width: 260px;
-  text-align: center;
-  box-shadow: 0 0 10px black;
-}
-
-.circle {
-  width: 120px;
-  height: 120px;
-  border-radius: 50%;
-  background: conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: auto;
-}
-
-.inner {
-  width: 90px;
-  height: 90px;
-  border-radius: 50%;
-  background: #0f172a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-}
-
-.weather {
-  font-size: 40px;
-  margin: 10px;
-}
-
-.download {
-  text-align: center;
-  margin-top: 40px;
 }
 </style>
 
@@ -203,31 +183,39 @@ button {
 
 <body>
 
-<div class="login" id="loginBox">
+<div id="loginBox">
   <h2>Login</h2>
   <input id="u" placeholder="Username"><br>
   <input id="p" type="password" placeholder="Password"><br>
   <button onclick="login()">Login</button>
 </div>
 
-<div class="dashboard" id="dash">
-  <h1 style="text-align:center;">🌍 Pollution Dashboard</h1>
+<div id="dash" style="display:none;">
+  <h1>🌍 Pollution Dashboard</h1>
 
-  <div class="container" id="data"></div>
-
-  <div class="download">
+  <div id="adminControls" style="display:none;">
     <button onclick="download()">📥 Download CSV</button>
+    <button onclick="reset()">🗑 Reset All</button>
   </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Node</th>
+        <th>Temp</th>
+        <th>Humidity</th>
+        <th>Gas</th>
+        <th>Time</th>
+        <th id="actionHead">Action</th>
+      </tr>
+    </thead>
+    <tbody id="data"></tbody>
+  </table>
 </div>
 
 <script>
 
-function getWeather(temp){
-  if(temp > 35) return "☀️";
-  if(temp > 25) return "⛅";
-  if(temp > 15) return "☁️";
-  return "🌧";
-}
+let role = "";
 
 async function login(){
   let res = await fetch('/login',{
@@ -239,8 +227,17 @@ async function login(){
   let d = await res.json();
 
   if(d.success){
+    role = d.role;
+
     loginBox.style.display='none';
     dash.style.display='block';
+
+    if(role === "admin"){
+      adminControls.style.display='block';
+    } else {
+      actionHead.style.display='none';
+    }
+
     loadData();
   } else {
     alert("Wrong login");
@@ -255,34 +252,34 @@ async function loadData(){
 
   for(let node in data){
     let d = data[node];
-    let deg = (d.temp / 50) * 360;
 
     html += \`
-    <div class="card">
-      <h2>\${d.node}</h2>
-
-      <div class="weather">\${getWeather(d.temp)}</div>
-
-      <div class="circle" style="--deg:\${deg}deg">
-        <div class="inner">\${d.temp}°C</div>
-      </div>
-
-      <p>💧 Humidity: \${d.hum}%</p>
-      <p>💨 Gas: \${d.gas}</p>
-      <p>🕒 \${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</p>
-
-      \${d.gas > 2000 ? "<p style='color:red;'>⚠ Gas Alert</p>" : ""}
-    </div>
+    <tr>
+      <td>\${d.node}</td>
+      <td>\${d.temp}</td>
+      <td>\${d.hum}</td>
+      <td>\${d.gas}</td>
+      <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
+      \${role==="admin" ? \`<td><button onclick="del('\${d.node}')">Clear</button></td>\` : ""}
+    </tr>
     \`;
   }
 
   document.getElementById("data").innerHTML = html;
 
-  setTimeout(loadData, 2000);
+  setTimeout(loadData, 3000);
 }
 
 function download(){
-  window.location = '/download';
+  window.location='/download';
+}
+
+function reset(){
+  fetch('/reset').then(()=>alert("All Data Cleared"));
+}
+
+function del(node){
+  fetch('/delete/'+node).then(()=>alert(node+" cleared"));
 }
 
 </script>
