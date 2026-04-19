@@ -93,7 +93,7 @@ app.get('/api/data', (req, res) => {
   res.json(filtered);
 });
 
-// ===== ADMIN APIs =====
+// ===== ADMIN =====
 app.get('/reset', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
   await Data.deleteMany({});
@@ -111,21 +111,30 @@ app.get('/delete/:node', async (req, res) => {
   res.send("Deleted");
 });
 
+// ===== CSV (SEPARATE NODE COLUMNS) =====
 app.get('/download', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
 
   const data = await Data.find().sort({ time: 1 });
 
-  const formatted = data.map(d => ({
-    Time: new Date(d.time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
-    Node: d.node,
-    Temperature: d.temp,
-    Humidity: d.hum,
-    Gas: d.gas
-  }));
+  let rows = {};
+
+  data.forEach(d => {
+    let time = new Date(d.time).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata"
+    });
+
+    if (!rows[time]) rows[time] = { Time: time };
+
+    rows[time][`${d.node}_Temp`] = d.temp;
+    rows[time][`${d.node}_Hum`] = d.hum;
+    rows[time][`${d.node}_Gas`] = d.gas;
+  });
+
+  const finalData = Object.values(rows);
 
   const parser = new Parser();
-  const csv = parser.parse(formatted);
+  const csv = parser.parse(finalData);
 
   res.header('Content-Type', 'text/csv');
   res.attachment('iot_data.csv');
@@ -141,70 +150,50 @@ res.send(`
 <title>IoT Dashboard</title>
 
 <style>
-body {
-  font-family: Arial;
-  background: #0f172a;
-  color: white;
-  text-align: center;
-}
+body { font-family: Arial; background:#0f172a; color:white; text-align:center; }
+button { padding:10px; margin:10px; background:#22c55e; border:none; color:white; cursor:pointer; }
 
-button {
-  padding: 10px;
-  margin: 10px;
-  background: #22c55e;
-  border: none;
-  color: white;
-  cursor: pointer;
-}
-
-.container {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 20px;
-}
+.container { display:flex; flex-wrap:wrap; justify-content:center; gap:20px; }
 
 .card {
-  background: #1e293b;
-  padding: 20px;
-  border-radius: 15px;
-  width: 250px;
+  background:#1e293b;
+  padding:20px;
+  border-radius:15px;
+  width:250px;
 }
 
 .circle {
-  width: 120px;
-  height: 120px;
-  border-radius: 50%;
-  background: conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: auto;
+  width:120px;
+  height:120px;
+  border-radius:50%;
+  background:conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  margin:auto;
 }
 
 .inner {
-  width: 90px;
-  height: 90px;
-  border-radius: 50%;
-  background: #0f172a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width:90px;
+  height:90px;
+  border-radius:50%;
+  background:#0f172a;
+  display:flex;
+  align-items:center;
+  justify-content:center;
 }
 
-.weather {
-  font-size: 40px;
-}
+.weather { font-size:40px; }
 
 table {
-  margin: auto;
-  width: 80%;
-  border-collapse: collapse;
+  margin:auto;
+  width:80%;
+  border-collapse:collapse;
 }
 
 th, td {
-  border: 1px solid white;
-  padding: 10px;
+  border:1px solid white;
+  padding:10px;
 }
 </style>
 </head>
@@ -213,13 +202,11 @@ th, td {
 
 <h1>🌍 IoT Dashboard</h1>
 
-<!-- ROLE SELECT -->
 <div id="roleSelect">
   <button onclick="selectRole('admin')">👑 Admin</button>
   <button onclick="selectRole('user')">👤 User</button>
 </div>
 
-<!-- LOGIN -->
 <div id="loginBox" style="display:none;">
   <h2 id="roleTitle"></h2>
   <input id="u" placeholder="Username"><br>
@@ -227,13 +214,11 @@ th, td {
   <button onclick="login()">Login</button>
 </div>
 
-<!-- USER UI -->
 <div id="userUI" style="display:none;">
   <h2>User Dashboard</h2>
   <div class="container" id="cards"></div>
 </div>
 
-<!-- ADMIN UI -->
 <div id="adminUI" style="display:none;">
   <h2>Admin Dashboard</h2>
   <button onclick="download()">Download CSV</button>
@@ -256,27 +241,27 @@ th, td {
 
 <script>
 
-let selectedRole = "";
+let selectedRole="";
 
 function selectRole(role){
-  selectedRole = role;
+  selectedRole=role;
   roleSelect.style.display="none";
   loginBox.style.display="block";
-  roleTitle.innerText = role.toUpperCase() + " LOGIN";
+  roleTitle.innerText=role.toUpperCase()+" LOGIN";
 }
 
 async function login(){
-  let res = await fetch('/login',{
+  let res=await fetch('/login',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
-      username: u.value,
-      password: p.value,
-      role: selectedRole
+      username:u.value,
+      password:p.value,
+      role:selectedRole
     })
   });
 
-  let d = await res.json();
+  let d=await res.json();
 
   if(d.success){
     loginBox.style.display='none';
@@ -288,7 +273,6 @@ async function login(){
       userUI.style.display="block";
       loadUser();
     }
-
   } else {
     alert("Wrong credentials");
   }
@@ -302,8 +286,8 @@ function getWeather(t){
 }
 
 async function loadUser(){
-  let res = await fetch('/api/data');
-  let data = await res.json();
+  let res=await fetch('/api/data');
+  let data=await res.json();
 
   let html="";
   for(let n in data){
@@ -327,8 +311,8 @@ async function loadUser(){
 }
 
 async function loadAdmin(){
-  let res = await fetch('/api/data');
-  let data = await res.json();
+  let res=await fetch('/api/data');
+  let data=await res.json();
 
   let html="";
   for(let n in data){
