@@ -9,7 +9,12 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ===== ROLE =====
+// ===== USERS =====
+const USERS = {
+  admin: { password: "1234", role: "admin" },
+  user: { password: "1234", role: "user" }
+};
+
 let currentRole = "";
 
 // ===== MONGODB =====
@@ -57,13 +62,23 @@ client.on('message', async (topic, message) => {
   }
 });
 
-// ===== ROLE SELECT =====
-app.post('/setRole', (req, res) => {
-  currentRole = req.body.role;
-  res.json({ success: true });
+// ===== LOGIN =====
+app.post('/login', (req, res) => {
+  const { username, password, role } = req.body;
+
+  if (USERS[username] &&
+      USERS[username].password === password &&
+      USERS[username].role === role) {
+
+    currentRole = role;
+    res.json({ success: true });
+
+  } else {
+    res.json({ success: false });
+  }
 });
 
-// ===== FILTER DATA =====
+// ===== API =====
 app.get('/api/data', (req, res) => {
   const now = new Date();
   let filtered = {};
@@ -191,7 +206,6 @@ th, td {
   border: 1px solid white;
   padding: 10px;
 }
-
 </style>
 </head>
 
@@ -199,16 +213,27 @@ th, td {
 
 <h1>🌍 IoT Dashboard</h1>
 
+<!-- ROLE SELECT -->
 <div id="roleSelect">
-  <button onclick="setRole('admin')">👑 Admin</button>
-  <button onclick="setRole('user')">👤 User</button>
+  <button onclick="selectRole('admin')">👑 Admin</button>
+  <button onclick="selectRole('user')">👤 User</button>
 </div>
 
+<!-- LOGIN -->
+<div id="loginBox" style="display:none;">
+  <h2 id="roleTitle"></h2>
+  <input id="u" placeholder="Username"><br>
+  <input id="p" type="password" placeholder="Password"><br>
+  <button onclick="login()">Login</button>
+</div>
+
+<!-- USER UI -->
 <div id="userUI" style="display:none;">
   <h2>User Dashboard</h2>
   <div class="container" id="cards"></div>
 </div>
 
+<!-- ADMIN UI -->
 <div id="adminUI" style="display:none;">
   <h2>Admin Dashboard</h2>
   <button onclick="download()">Download CSV</button>
@@ -231,24 +256,49 @@ th, td {
 
 <script>
 
+let selectedRole = "";
+
+function selectRole(role){
+  selectedRole = role;
+  roleSelect.style.display="none";
+  loginBox.style.display="block";
+  roleTitle.innerText = role.toUpperCase() + " LOGIN";
+}
+
+async function login(){
+  let res = await fetch('/login',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      username: u.value,
+      password: p.value,
+      role: selectedRole
+    })
+  });
+
+  let d = await res.json();
+
+  if(d.success){
+    loginBox.style.display='none';
+
+    if(selectedRole==="admin"){
+      adminUI.style.display="block";
+      loadAdmin();
+    } else {
+      userUI.style.display="block";
+      loadUser();
+    }
+
+  } else {
+    alert("Wrong credentials");
+  }
+}
+
 function getWeather(t){
   if(t>35) return "☀️";
   if(t>25) return "⛅";
   if(t>15) return "☁️";
   return "🌧";
-}
-
-async function setRole(r){
-  await fetch('/setRole',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({role:r})});
-  roleSelect.style.display="none";
-
-  if(r==="user"){
-    userUI.style.display="block";
-    loadUser();
-  } else {
-    adminUI.style.display="block";
-    loadAdmin();
-  }
 }
 
 async function loadUser(){
