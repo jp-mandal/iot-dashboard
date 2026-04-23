@@ -3,11 +3,25 @@ const mqtt = require('mqtt');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const { Parser } = require('json2csv');
+const webpush = require('web-push');
 
 const app = express();
 app.use(bodyParser.json());
+app.use(express.static('public'));
 
 const PORT = process.env.PORT || 3000;
+
+// ===== VAPID KEYS =====
+const PUBLIC_KEY = "BAV36BWFZHKSJhaSxWvPeFODkdGTG5kZjn6uOZQtM0wrvcvLy4WRnNVwIJRYtMrCVAWrmx_4uF5We8G-YmX9rmU";
+const PRIVATE_KEY = "uOnrKBHB14vMBN7zPFqmi4XCQv4C2ZG2SGmzXHRcdvA";
+
+webpush.setVapidDetails(
+  "mailto:jpmandal123456@gmail.com",
+  PUBLIC_KEY,
+  PRIVATE_KEY
+);
+
+let subscribers = [];
 
 // ===== USERS =====
 const USERS = {
@@ -57,9 +71,28 @@ client.on('message', async (topic, message) => {
     latestData[data.node] = data;
     await Data.create(data);
 
+    // ===== PUSH ALERT =====
+    if (data.temp > 35 || data.gas > 2000) {
+      const payload = JSON.stringify({
+        title: "⚠️ ALERT!",
+        body: `Node: ${data.node}\nTemp: ${data.temp}°C\nGas: ${data.gas}`
+      });
+
+      subscribers.forEach(sub => {
+        webpush.sendNotification(sub, payload)
+          .catch(err => console.log("Push error:", err.message));
+      });
+    }
+
   } catch (err) {
     console.log(err.message);
   }
+});
+
+// ===== SUBSCRIBE NOTIFICATION =====
+app.post('/subscribe-notification', (req, res) => {
+  subscribers.push(req.body);
+  res.sendStatus(201);
 });
 
 // ===== LOGIN =====
@@ -111,7 +144,7 @@ app.get('/delete/:node', async (req, res) => {
   res.send("Deleted");
 });
 
-// ===== CSV (SEPARATE NODE COLUMNS) =====
+// ===== CSV =====
 app.get('/download', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
 
@@ -131,10 +164,8 @@ app.get('/download', async (req, res) => {
     rows[time][`${d.node}_Gas`] = d.gas;
   });
 
-  const finalData = Object.values(rows);
-
   const parser = new Parser();
-  const csv = parser.parse(finalData);
+  const csv = parser.parse(Object.values(rows));
 
   res.header('Content-Type', 'text/csv');
   res.attachment('iot_data.csv');
@@ -148,6 +179,7 @@ res.send(`
 <html>
 <head>
 <title>IoT Dashboard</title>
+<link rel="manifest" href="/manifest.json">
 
 <style>
 body { font-family: Arial; background:#0f172a; color:white; text-align:center; }
@@ -184,23 +216,14 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
 }
 
 .weather { font-size:40px; }
-
-table {
-  margin:auto;
-  width:80%;
-  border-collapse:collapse;
-}
-
-th, td {
-  border:1px solid white;
-  padding:10px;
-}
 </style>
 </head>
 
 <body>
 
 <h1>🌍 IoT Dashboard</h1>
+
+<button onclick="enableNotifications()">🔔 Enable Alerts</button>
 
 <div id="roleSelect">
   <button onclick="selectRole('admin')">👑 Admin</button>
@@ -215,28 +238,7 @@ th, td {
 </div>
 
 <div id="userUI" style="display:none;">
-  <h2>User Dashboard</h2>
   <div class="container" id="cards"></div>
-</div>
-
-<div id="adminUI" style="display:none;">
-  <h2>Admin Dashboard</h2>
-  <button onclick="download()">Download CSV</button>
-  <button onclick="reset()">Reset DB</button>
-
-  <table>
-    <thead>
-      <tr>
-        <th>Node</th>
-        <th>Temp</th>
-        <th>Hum</th>
-        <th>Gas</th>
-        <th>Time</th>
-        <th>Action</th>
-      </tr>
-    </thead>
-    <tbody id="table"></tbody>
-  </table>
 </div>
 
 <script>
@@ -265,14 +267,8 @@ async function login(){
 
   if(d.success){
     loginBox.style.display='none';
-
-    if(selectedRole==="admin"){
-      adminUI.style.display="block";
-      loadAdmin();
-    } else {
-      userUI.style.display="block";
-      loadUser();
-    }
+    userUI.style.display="block";
+    loadUser();
   } else {
     alert("Wrong credentials");
   }
@@ -310,32 +306,29 @@ async function loadUser(){
   setTimeout(loadUser,2000);
 }
 
-async function loadAdmin(){
-  let res=await fetch('/api/data');
-  let data=await res.json();
-
-  let html="";
-  for(let n in data){
-    let d=data[n];
-
-    html+=\`
-    <tr>
-      <td>\${d.node}</td>
-      <td>\${d.temp}</td>
-      <td>\${d.hum}</td>
-      <td>\${d.gas}</td>
-      <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
-      <td><button onclick="del('\${d.node}')">Clear</button></td>
-    </tr>\`;
+// ===== ENABLE NOTIFICATIONS =====
+async function enableNotifications(){
+  const permission = await Notification.requestPermission();
+  if(permission !== "granted"){
+    alert("Permission denied");
+    return;
   }
 
-  table.innerHTML=html;
-  setTimeout(loadAdmin,3000);
-}
+  const reg = await navigator.serviceWorker.register('/sw.js');
 
-function reset(){ fetch('/reset'); }
-function del(n){ fetch('/delete/'+n); }
-function download(){ window.location='/download'; }
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: "${PUBLIC_KEY}"
+  });
+
+  await fetch('/subscribe-notification',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(sub)
+  });
+
+  alert("Notifications Enabled!");
+}
 
 </script>
 
