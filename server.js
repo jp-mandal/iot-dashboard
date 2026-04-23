@@ -7,7 +7,6 @@ const webpush = require('web-push');
 
 const app = express();
 app.use(bodyParser.json());
-app.use(express.static('public'));
 
 const PORT = process.env.PORT || 3000;
 
@@ -77,16 +76,13 @@ client.on('message', async (topic, message) => {
 
     const node = data.node;
 
-    // ===== BUFFER =====
     if (!buffer[node]) buffer[node] = [];
     buffer[node].push(data);
 
-    // keep only last 1 min
     buffer[node] = buffer[node].filter(d =>
       (Date.now() - new Date(d.time)) < 60000
     );
 
-    // ===== STORE AVG EVERY 1 MIN =====
     if (!lastStoredTime[node] || (Date.now() - lastStoredTime[node] > 60000)) {
 
       const arr = buffer[node];
@@ -109,9 +105,7 @@ client.on('message', async (topic, message) => {
 
       lastStoredTime[node] = Date.now();
 
-      console.log("📊 AVG STORED:", avgData);
-
-      // ===== NOTIFICATION (5 MIN) =====
+      // ===== NOTIFICATION EVERY 5 MIN =====
       if ((Date.now() - lastAlertTime > 300000) && avgData.temp > 30) {
 
         lastAlertTime = Date.now();
@@ -125,7 +119,7 @@ client.on('message', async (topic, message) => {
 
         subs.forEach(sub => {
           webpush.sendNotification(sub, payload)
-          .catch(err => console.log("Push error:", err.message));
+          .catch(err => console.log(err.message));
         });
       }
     }
@@ -223,12 +217,243 @@ app.get('/download', async (req, res) => {
   res.send(csv);
 });
 
-// ===== UI (UNCHANGED) =====
+// ===== UI (FULL INLINE HTML) =====
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/index.html');
+res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+<title>IoT Dashboard</title>
+<style>
+body { font-family: Arial; background:#0f172a; color:white; text-align:center; }
+button { padding:10px; margin:10px; background:#22c55e; border:none; color:white; cursor:pointer; }
+
+.container { display:flex; flex-wrap:wrap; justify-content:center; gap:20px; }
+
+.card {
+  background:#1e293b;
+  padding:20px;
+  border-radius:15px;
+  width:250px;
+}
+
+.circle {
+  width:120px;
+  height:120px;
+  border-radius:50%;
+  background:conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  margin:auto;
+}
+
+.inner {
+  width:90px;
+  height:90px;
+  border-radius:50%;
+  background:#0f172a;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.weather { font-size:40px; }
+
+table {
+  margin:auto;
+  width:80%;
+  border-collapse:collapse;
+}
+
+th, td {
+  border:1px solid white;
+  padding:10px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>🌍 IoT Dashboard</h1>
+<button onclick="enableNotifications()">🔔 Enable Alerts</button>
+
+<div id="roleSelect">
+  <button onclick="selectRole('admin')">👑 Admin</button>
+  <button onclick="selectRole('user')">👤 User</button>
+</div>
+
+<div id="loginBox" style="display:none;">
+  <h2 id="roleTitle"></h2>
+  <input id="u" placeholder="Username"><br>
+  <input id="p" type="password" placeholder="Password"><br>
+  <button onclick="login()">Login</button>
+</div>
+
+<div id="userUI" style="display:none;">
+  <h2>User Dashboard</h2>
+  <div class="container" id="cards"></div>
+</div>
+
+<div id="adminUI" style="display:none;">
+  <h2>Admin Dashboard</h2>
+  <button onclick="download()">Download CSV</button>
+  <button onclick="reset()">Reset DB</button>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Node</th>
+        <th>Temp</th>
+        <th>Hum</th>
+        <th>Gas</th>
+        <th>Time</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="table"></tbody>
+  </table>
+</div>
+
+<script>
+
+const publicKey = "${PUBLIC_KEY}";
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map(char => char.charCodeAt(0)));
+}
+
+// 🔔 ENABLE NOTIFICATION
+async function enableNotifications() {
+
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') return alert("Permission denied");
+
+  const sw = await navigator.serviceWorker.register('/sw.js');
+
+  const sub = await sw.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(publicKey)
+  });
+
+  await fetch('/subscribe-notification', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(sub)
+  });
+
+  alert("✅ Notifications Enabled!");
+}
+
+// ===== EXISTING UI LOGIC (UNCHANGED) =====
+
+let selectedRole="";
+
+function selectRole(role){
+  selectedRole=role;
+  roleSelect.style.display="none";
+  loginBox.style.display="block";
+  roleTitle.innerText=role.toUpperCase()+" LOGIN";
+}
+
+async function login(){
+  let res=await fetch('/login',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      username:u.value,
+      password:p.value,
+      role:selectedRole
+    })
+  });
+
+  let d=await res.json();
+
+  if(d.success){
+    loginBox.style.display='none';
+
+    if(selectedRole==="admin"){
+      adminUI.style.display="block";
+      loadAdmin();
+    } else {
+      userUI.style.display="block";
+      loadUser();
+    }
+  } else {
+    alert("Wrong credentials");
+  }
+}
+
+function getWeather(t){
+  if(t>35) return "☀️";
+  if(t>25) return "⛅";
+  if(t>15) return "☁️";
+  return "🌧";
+}
+
+async function loadUser(){
+  let res=await fetch('/api/data');
+  let data=await res.json();
+
+  let html="";
+  for(let n in data){
+    let d=data[n];
+    let deg=(d.temp/50)*360;
+
+    html+=\`
+    <div class="card">
+      <h3>\${d.node}</h3>
+      <div class="weather">\${getWeather(d.temp)}</div>
+      <div class="circle" style="--deg:\${deg}deg">
+        <div class="inner">\${d.temp}°C</div>
+      </div>
+      <p>💧 \${d.hum}%</p>
+      <p>💨 \${d.gas}</p>
+    </div>\`;
+  }
+
+  cards.innerHTML=html;
+  setTimeout(loadUser,2000);
+}
+
+async function loadAdmin(){
+  let res=await fetch('/api/data');
+  let data=await res.json();
+
+  let html="";
+  for(let n in data){
+    let d=data[n];
+
+    html+=\`
+    <tr>
+      <td>\${d.node}</td>
+      <td>\${d.temp}</td>
+      <td>\${d.hum}</td>
+      <td>\${d.gas}</td>
+      <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
+      <td><button onclick="del('\${d.node}')">Clear</button></td>
+    </tr>\`;
+  }
+
+  table.innerHTML=html;
+  setTimeout(loadAdmin,3000);
+}
+
+function reset(){ fetch('/reset'); }
+function del(n){ fetch('/delete/'+n); }
+function download(){ window.location='/download'; }
+
+</script>
+
+</body>
+</html>
+`);
 });
 
 // ===== START =====
 app.listen(PORT, () => {
-  console.log("🚀 Server running on port", PORT);
+  console.log("🚀 Running on port", PORT);
 });
