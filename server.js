@@ -10,6 +10,7 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
+
 // ===== VAPID KEYS =====
 const PUBLIC_KEY = "BAV36BWFZHKSJhaSxWvPeFODkdGTG5kZjn6uOZQtM0wrvcvLy4WRnNVwIJRYtMrCVAWrmx_4uF5We8G-YmX9rmU";
 const PRIVATE_KEY = "uOnrKBHB14vMBN7zPFqmi4XCQv4C2ZG2SGmzXHRcdvA";
