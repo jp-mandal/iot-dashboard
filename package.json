@@ -11,5 +11,6 @@
     "json2csv": "^6.0.0-alpha.2",
     "mongoose": "^9.4.1",
     "mqtt": "^5.15.1"
+    "web-push": "^3.6.6"
   }
 }
