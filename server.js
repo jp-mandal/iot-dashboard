@@ -21,9 +21,6 @@ webpush.setVapidDetails(
   PRIVATE_KEY
 );
 
-let subscribers = [];
-let lastAlertTime = 0;
-
 // ===== USERS =====
 const USERS = {
   admin: { password: "1234", role: "admin" },
@@ -37,7 +34,7 @@ mongoose.connect(process.env.MONGO_URL)
 .then(() => console.log("✅ MongoDB Connected"))
 .catch(err => console.log(err));
 
-// ===== MODEL =====
+// ===== MODELS =====
 const Data = mongoose.model("Data", {
   node: String,
   temp: Number,
@@ -46,8 +43,16 @@ const Data = mongoose.model("Data", {
   time: { type: Date, default: Date.now }
 });
 
-// ===== STORE =====
+const Subscriber = mongoose.model("Subscriber", {
+  endpoint: String,
+  keys: Object
+});
+
+// ===== MEMORY =====
 let latestData = {};
+let buffer = {};
+let lastStoredTime = {};
+let lastAlertTime = 0;
 
 // ===== MQTT =====
 const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hivemq.cloud', {
@@ -61,6 +66,7 @@ client.on('connect', () => {
   client.subscribe("pollution/#");
 });
 
+// ===== MAIN LOGIC =====
 client.on('message', async (topic, message) => {
   try {
     let text = message.toString();
@@ -69,22 +75,59 @@ client.on('message', async (topic, message) => {
     const data = JSON.parse(text);
     data.time = new Date();
 
-    latestData[data.node] = data;
-    await Data.create(data);
+    const node = data.node;
 
-    // ===== ALERT (TEMP > 30°C) =====
-    if ((Date.now() - lastAlertTime > 60000) && data.temp > 30) {
-      lastAlertTime = Date.now();
+    // ===== BUFFER =====
+    if (!buffer[node]) buffer[node] = [];
+    buffer[node].push(data);
 
-      const payload = JSON.stringify({
-        title: "🔥 Temperature Alert!",
-        body: `${data.node} → ${data.temp}°C`
-      });
+    // keep only last 1 min
+    buffer[node] = buffer[node].filter(d =>
+      (Date.now() - new Date(d.time)) < 60000
+    );
 
-      subscribers.forEach(sub => {
-        webpush.sendNotification(sub, payload)
-        .catch(err => console.log(err.message));
-      });
+    // ===== STORE AVG EVERY 1 MIN =====
+    if (!lastStoredTime[node] || (Date.now() - lastStoredTime[node] > 60000)) {
+
+      const arr = buffer[node];
+      if (arr.length === 0) return;
+
+      const avgTemp = arr.reduce((s,d)=>s+d.temp,0)/arr.length;
+      const avgHum  = arr.reduce((s,d)=>s+d.hum,0)/arr.length;
+      const avgGas  = arr.reduce((s,d)=>s+d.gas,0)/arr.length;
+
+      const avgData = {
+        node,
+        temp: Number(avgTemp.toFixed(2)),
+        hum: Number(avgHum.toFixed(2)),
+        gas: Math.round(avgGas),
+        time: new Date()
+      };
+
+      latestData[node] = avgData;
+      await Data.create(avgData);
+
+      lastStoredTime[node] = Date.now();
+
+      console.log("📊 AVG STORED:", avgData);
+
+      // ===== NOTIFICATION (5 MIN) =====
+      if ((Date.now() - lastAlertTime > 300000) && avgData.temp > 30) {
+
+        lastAlertTime = Date.now();
+
+        const payload = JSON.stringify({
+          title: "🔥 Temperature Alert",
+          body: `${node}: ${avgData.temp}°C`
+        });
+
+        const subs = await Subscriber.find();
+
+        subs.forEach(sub => {
+          webpush.sendNotification(sub, payload)
+          .catch(err => console.log("Push error:", err.message));
+        });
+      }
     }
 
   } catch (err) {
@@ -93,8 +136,12 @@ client.on('message', async (topic, message) => {
 });
 
 // ===== SUBSCRIBE =====
-app.post('/subscribe-notification', (req, res) => {
-  subscribers.push(req.body);
+app.post('/subscribe-notification', async (req, res) => {
+  const sub = req.body;
+
+  const exists = await Subscriber.findOne({ endpoint: sub.endpoint });
+  if (!exists) await Subscriber.create(sub);
+
   res.sendStatus(201);
 });
 
@@ -109,9 +156,7 @@ app.post('/login', (req, res) => {
     currentRole = role;
     res.json({ success: true });
 
-  } else {
-    res.json({ success: false });
-  }
+  } else res.json({ success: false });
 });
 
 // ===== API =====
@@ -132,19 +177,22 @@ app.get('/api/data', (req, res) => {
 // ===== ADMIN =====
 app.get('/reset', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
+
   await Data.deleteMany({});
   latestData = {};
-  res.send("Cleared");
+
+  res.send("Database Cleared");
 });
 
 app.get('/delete/:node', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
 
-  let node = req.params.node;
+  const node = req.params.node;
+
   await Data.deleteMany({ node });
   delete latestData[node];
 
-  res.send("Deleted");
+  res.send("Node Deleted");
 });
 
 // ===== CSV =====
@@ -175,235 +223,12 @@ app.get('/download', async (req, res) => {
   res.send(csv);
 });
 
-// ===== UI (UNCHANGED + ONLY BUTTON ADDED) =====
+// ===== UI (UNCHANGED) =====
 app.get('/', (req, res) => {
-res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<title>IoT Dashboard</title>
-<link rel="manifest" href="/manifest.json">
-
-<style>
-body { font-family: Arial; background:#0f172a; color:white; text-align:center; }
-button { padding:10px; margin:10px; background:#22c55e; border:none; color:white; cursor:pointer; }
-
-.container { display:flex; flex-wrap:wrap; justify-content:center; gap:20px; }
-
-.card {
-  background:#1e293b;
-  padding:20px;
-  border-radius:15px;
-  width:250px;
-}
-
-.circle {
-  width:120px;
-  height:120px;
-  border-radius:50%;
-  background:conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  margin:auto;
-}
-
-.inner {
-  width:90px;
-  height:90px;
-  border-radius:50%;
-  background:#0f172a;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-}
-
-.weather { font-size:40px; }
-
-table {
-  margin:auto;
-  width:80%;
-  border-collapse:collapse;
-}
-
-th, td {
-  border:1px solid white;
-  padding:10px;
-}
-</style>
-</head>
-
-<body>
-
-<h1>🌍 IoT Dashboard</h1>
-
-<!-- ONLY ADDITION -->
-<button onclick="enableNotifications()">🔔 Enable Alerts</button>
-
-<div id="roleSelect">
-  <button onclick="selectRole('admin')">👑 Admin</button>
-  <button onclick="selectRole('user')">👤 User</button>
-</div>
-
-<div id="loginBox" style="display:none;">
-  <h2 id="roleTitle"></h2>
-  <input id="u" placeholder="Username"><br>
-  <input id="p" type="password" placeholder="Password"><br>
-  <button onclick="login()">Login</button>
-</div>
-
-<div id="userUI" style="display:none;">
-  <h2>User Dashboard</h2>
-  <div class="container" id="cards"></div>
-</div>
-
-<div id="adminUI" style="display:none;">
-  <h2>Admin Dashboard</h2>
-  <button onclick="download()">Download CSV</button>
-  <button onclick="reset()">Reset DB</button>
-
-  <table>
-    <thead>
-      <tr>
-        <th>Node</th>
-        <th>Temp</th>
-        <th>Hum</th>
-        <th>Gas</th>
-        <th>Time</th>
-        <th>Action</th>
-      </tr>
-    </thead>
-    <tbody id="table"></tbody>
-  </table>
-</div>
-
-<script>
-
-let selectedRole="";
-
-function selectRole(role){
-  selectedRole=role;
-  roleSelect.style.display="none";
-  loginBox.style.display="block";
-  roleTitle.innerText=role.toUpperCase()+" LOGIN";
-}
-
-async function login(){
-  let res=await fetch('/login',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      username:u.value,
-      password:p.value,
-      role:selectedRole
-    })
-  });
-
-  let d=await res.json();
-
-  if(d.success){
-    loginBox.style.display='none';
-
-    if(selectedRole==="admin"){
-      adminUI.style.display="block";
-      loadAdmin();
-    } else {
-      userUI.style.display="block";
-      loadUser();
-    }
-  } else {
-    alert("Wrong credentials");
-  }
-}
-
-function getWeather(t){
-  if(t>35) return "☀️";
-  if(t>25) return "⛅";
-  if(t>15) return "☁️";
-  return "🌧";
-}
-
-async function loadUser(){
-  let res=await fetch('/api/data');
-  let data=await res.json();
-
-  let html="";
-  for(let node in data){
-    let d=data[node];
-    let deg=(d.temp/50)*360;
-
-    html+=\`
-    <div class="card">
-      <h2>\${d.node}</h2>
-      <div class="weather">\${getWeather(d.temp)}</div>
-      <div class="circle" style="--deg:\${deg}deg">
-        <div class="inner">\${d.temp}°C</div>
-      </div>
-      <p>💧 Hum: \${d.hum}%</p>
-      <p>💨 Gas: \${d.gas}</p>
-    </div>\`;
-  }
-
-  document.getElementById("cards").innerHTML = html;
-  setTimeout(loadUser,2000);
-}
-
-async function loadAdmin(){
-  let res=await fetch('/api/data');
-  let data=await res.json();
-
-  let html="";
-  for(let node in data){
-    let d=data[node];
-
-    html+=\`
-    <tr>
-      <td>\${d.node}</td>
-      <td>\${d.temp}</td>
-      <td>\${d.hum}</td>
-      <td>\${d.gas}</td>
-      <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
-      <td><button onclick="del('\${d.node}')">Clear</button></td>
-    </tr>\`;
-  }
-
-  document.getElementById("table").innerHTML = html;
-  setTimeout(loadAdmin,3000);
-}
-
-function reset(){ fetch('/reset'); }
-function del(n){ fetch('/delete/'+n); }
-function download(){ window.location='/download'; }
-
-// 🔔 NOTIFICATION (ONLY ADDITION)
-async function enableNotifications(){
-  const permission = await Notification.requestPermission();
-  if(permission!=="granted"){ alert("Denied"); return; }
-
-  const reg = await navigator.serviceWorker.register('/sw.js');
-
-  const sub = await reg.pushManager.subscribe({
-    userVisibleOnly:true,
-    applicationServerKey:"${PUBLIC_KEY}"
-  });
-
-  await fetch('/subscribe-notification',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(sub)
-  });
-
-  alert("Notifications Enabled");
-}
-
-</script>
-
-</body>
-</html>
-`);
+  res.sendFile(__dirname + '/index.html');
 });
 
 // ===== START =====
 app.listen(PORT, () => {
-  console.log("🚀 Running on port", PORT);
+  console.log("🚀 Server running on port", PORT);
 });
