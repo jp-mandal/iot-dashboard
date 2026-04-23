@@ -71,16 +71,16 @@ client.on('message', async (topic, message) => {
     latestData[data.node] = data;
     await Data.create(data);
 
-    // ===== PUSH ALERT =====
-    if (data.temp > 35 || data.gas > 2000) {
+    // ===== ALERT =====
+    if (data.temp > 30 || data.gas > 2000) {
       const payload = JSON.stringify({
         title: "⚠️ ALERT!",
         body: `Node: ${data.node}\nTemp: ${data.temp}°C\nGas: ${data.gas}`
       });
 
       subscribers.forEach(sub => {
-        webpush.sendNotification(sub, payload)
-          .catch(err => console.log("Push error:", err.message));
+        webpush.sendNotification(sub)
+        .catch(err => console.log(err.message));
       });
     }
 
@@ -89,7 +89,7 @@ client.on('message', async (topic, message) => {
   }
 });
 
-// ===== SUBSCRIBE NOTIFICATION =====
+// ===== SUBSCRIBE =====
 app.post('/subscribe-notification', (req, res) => {
   subscribers.push(req.body);
   res.sendStatus(201);
@@ -187,42 +187,29 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
 
 .container { display:flex; flex-wrap:wrap; justify-content:center; gap:20px; }
 
-.card {
-  background:#1e293b;
-  padding:20px;
-  border-radius:15px;
-  width:250px;
-}
+.card { background:#1e293b; padding:20px; border-radius:15px; width:250px; }
 
 .circle {
-  width:120px;
-  height:120px;
-  border-radius:50%;
+  width:120px; height:120px; border-radius:50%;
   background:conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  margin:auto;
+  display:flex; align-items:center; justify-content:center; margin:auto;
 }
 
 .inner {
-  width:90px;
-  height:90px;
-  border-radius:50%;
-  background:#0f172a;
-  display:flex;
-  align-items:center;
-  justify-content:center;
+  width:90px; height:90px; border-radius:50%;
+  background:#0f172a; display:flex; align-items:center; justify-content:center;
 }
 
 .weather { font-size:40px; }
+
+table { margin:auto; width:80%; border-collapse:collapse; }
+th, td { border:1px solid white; padding:10px; }
 </style>
 </head>
 
 <body>
 
 <h1>🌍 IoT Dashboard</h1>
-
 <button onclick="enableNotifications()">🔔 Enable Alerts</button>
 
 <div id="roleSelect">
@@ -241,8 +228,21 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
   <div class="container" id="cards"></div>
 </div>
 
-<script>
+<div id="adminUI" style="display:none;">
+  <button onclick="download()">Download CSV</button>
+  <button onclick="reset()">Reset DB</button>
 
+  <table>
+    <thead>
+      <tr>
+        <th>Node</th><th>Temp</th><th>Hum</th><th>Gas</th><th>Time</th><th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="table"></tbody>
+  </table>
+</div>
+
+<script>
 let selectedRole="";
 
 function selectRole(role){
@@ -256,22 +256,22 @@ async function login(){
   let res=await fetch('/login',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      username:u.value,
-      password:p.value,
-      role:selectedRole
-    })
+    body:JSON.stringify({username:u.value,password:p.value,role:selectedRole})
   });
 
   let d=await res.json();
 
   if(d.success){
     loginBox.style.display='none';
-    userUI.style.display="block";
-    loadUser();
-  } else {
-    alert("Wrong credentials");
-  }
+
+    if(selectedRole==="admin"){
+      adminUI.style.display="block";
+      loadAdmin();
+    } else {
+      userUI.style.display="block";
+      loadUser();
+    }
+  } else alert("Wrong credentials");
 }
 
 function getWeather(t){
@@ -306,19 +306,42 @@ async function loadUser(){
   setTimeout(loadUser,2000);
 }
 
-// ===== ENABLE NOTIFICATIONS =====
+async function loadAdmin(){
+  let res=await fetch('/api/data');
+  let data=await res.json();
+
+  let html="";
+  for(let n in data){
+    let d=data[n];
+
+    html+=\`
+    <tr>
+      <td>\${d.node}</td>
+      <td>\${d.temp}</td>
+      <td>\${d.hum}</td>
+      <td>\${d.gas}</td>
+      <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
+      <td><button onclick="del('\${d.node}')">Clear</button></td>
+    </tr>\`;
+  }
+
+  table.innerHTML=html;
+  setTimeout(loadAdmin,3000);
+}
+
+function reset(){ fetch('/reset'); }
+function del(n){ fetch('/delete/'+n); }
+function download(){ window.location='/download'; }
+
 async function enableNotifications(){
   const permission = await Notification.requestPermission();
-  if(permission !== "granted"){
-    alert("Permission denied");
-    return;
-  }
+  if(permission!=="granted"){ alert("Denied"); return; }
 
   const reg = await navigator.serviceWorker.register('/sw.js');
 
   const sub = await reg.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: "${PUBLIC_KEY}"
+    userVisibleOnly:true,
+    applicationServerKey:"${PUBLIC_KEY}"
   });
 
   await fetch('/subscribe-notification',{
@@ -327,9 +350,8 @@ async function enableNotifications(){
     body:JSON.stringify(sub)
   });
 
-  alert("Notifications Enabled!");
+  alert("Notifications Enabled");
 }
-
 </script>
 
 </body>
