@@ -105,7 +105,7 @@ client.on('message', async (topic, message) => {
 
       lastStoredTime[node] = Date.now();
 
-      // ===== NOTIFICATION EVERY 5 MIN =====
+      // ===== NOTIFICATION =====
       if ((Date.now() - lastAlertTime > 300000) && avgData.temp > 30) {
 
         lastAlertTime = Date.now();
@@ -132,10 +132,8 @@ client.on('message', async (topic, message) => {
 // ===== SUBSCRIBE =====
 app.post('/subscribe-notification', async (req, res) => {
   const sub = req.body;
-
   const exists = await Subscriber.findOne({ endpoint: sub.endpoint });
   if (!exists) await Subscriber.create(sub);
-
   res.sendStatus(201);
 });
 
@@ -171,21 +169,16 @@ app.get('/api/data', (req, res) => {
 // ===== ADMIN =====
 app.get('/reset', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
-
   await Data.deleteMany({});
   latestData = {};
-
   res.send("Database Cleared");
 });
 
 app.get('/delete/:node', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
-
   const node = req.params.node;
-
   await Data.deleteMany({ node });
   delete latestData[node];
-
   res.send("Node Deleted");
 });
 
@@ -194,7 +187,6 @@ app.get('/download', async (req, res) => {
   if (currentRole !== "admin") return res.send("Unauthorized");
 
   const data = await Data.find().sort({ time: 1 });
-
   let rows = {};
 
   data.forEach(d => {
@@ -217,13 +209,14 @@ app.get('/download', async (req, res) => {
   res.send(csv);
 });
 
-// ===== UI (FULL INLINE HTML) =====
+// ===== UI =====
 app.get('/', (req, res) => {
 res.send(`
 <!DOCTYPE html>
 <html>
 <head>
 <title>IoT Dashboard</title>
+
 <style>
 body { font-family: Arial; background:#0f172a; color:white; text-align:center; }
 button { padding:10px; margin:10px; background:#22c55e; border:none; color:white; cursor:pointer; }
@@ -317,38 +310,34 @@ th, td {
 
 <script>
 
+const ALL_NODES = ["node1","node2","node3"];
 const publicKey = "${PUBLIC_KEY}";
 
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
   const rawData = atob(base64);
-  return Uint8Array.from([...rawData].map(char => char.charCodeAt(0)));
+  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
 }
 
-// 🔔 ENABLE NOTIFICATION
-async function enableNotifications() {
-
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') return alert("Permission denied");
+async function enableNotifications(){
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") return alert("Permission denied");
 
   const sw = await navigator.serviceWorker.register('/sw.js');
-
   const sub = await sw.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToUint8Array(publicKey)
   });
 
-  await fetch('/subscribe-notification', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(sub)
+  await fetch('/subscribe-notification',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(sub)
   });
 
-  alert("✅ Notifications Enabled!");
+  alert("✅ Notifications Enabled");
 }
-
-// ===== EXISTING UI LOGIC (UNCHANGED) =====
 
 let selectedRole="";
 
@@ -363,11 +352,7 @@ async function login(){
   let res=await fetch('/login',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      username:u.value,
-      password:p.value,
-      role:selectedRole
-    })
+    body:JSON.stringify({username:u.value,password:p.value,role:selectedRole})
   });
 
   let d=await res.json();
@@ -382,9 +367,7 @@ async function login(){
       userUI.style.display="block";
       loadUser();
     }
-  } else {
-    alert("Wrong credentials");
-  }
+  } else alert("Wrong credentials");
 }
 
 function getWeather(t){
@@ -395,48 +378,70 @@ function getWeather(t){
 }
 
 async function loadUser(){
-  let res=await fetch('/api/data');
-  let data=await res.json();
+  let res = await fetch('/api/data');
+  let data = await res.json();
 
-  let html="";
-  for(let n in data){
-    let d=data[n];
-    let deg=(d.temp/50)*360;
+  let html = "";
 
-    html+=\`
-    <div class="card">
-      <h3>\${d.node}</h3>
-      <div class="weather">\${getWeather(d.temp)}</div>
-      <div class="circle" style="--deg:\${deg}deg">
-        <div class="inner">\${d.temp}°C</div>
-      </div>
-      <p>💧 \${d.hum}%</p>
-      <p>💨 \${d.gas}</p>
-    </div>\`;
-  }
+  ALL_NODES.forEach(n=>{
+    if(data[n]){
+      let d=data[n];
+      let deg=(d.temp/50)*360;
+
+      html+=\`
+      <div class="card">
+        <h3>\${d.node}</h3>
+        <div class="weather">\${getWeather(d.temp)}</div>
+        <div class="circle" style="--deg:\${deg}deg">
+          <div class="inner">\${d.temp}°C</div>
+        </div>
+        <p>💧 \${d.hum}%</p>
+        <p>💨 \${d.gas}</p>
+      </div>\`;
+    } else {
+      html+=\`
+      <div class="card">
+        <h3>\${n}</h3>
+        <div style="color:orange;">
+          ⚠️ Node under repair<br>
+          Service available soon
+        </div>
+      </div>\`;
+    }
+  });
 
   cards.innerHTML=html;
   setTimeout(loadUser,2000);
 }
 
 async function loadAdmin(){
-  let res=await fetch('/api/data');
-  let data=await res.json();
+  let res = await fetch('/api/data');
+  let data = await res.json();
 
   let html="";
-  for(let n in data){
-    let d=data[n];
 
-    html+=\`
-    <tr>
-      <td>\${d.node}</td>
-      <td>\${d.temp}</td>
-      <td>\${d.hum}</td>
-      <td>\${d.gas}</td>
-      <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
-      <td><button onclick="del('\${d.node}')">Clear</button></td>
-    </tr>\`;
-  }
+  ALL_NODES.forEach(n=>{
+    if(data[n]){
+      let d=data[n];
+
+      html+=\`
+      <tr>
+        <td>\${d.node}</td>
+        <td>\${d.temp}</td>
+        <td>\${d.hum}</td>
+        <td>\${d.gas}</td>
+        <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
+        <td><button onclick="del('\${d.node}')">Clear</button></td>
+      </tr>\`;
+    } else {
+      html+=\`
+      <tr>
+        <td>\${n}</td>
+        <td colspan="4" style="color:orange;">⚠️ Node under repair</td>
+        <td>-</td>
+      </tr>\`;
+    }
+  });
 
   table.innerHTML=html;
   setTimeout(loadAdmin,3000);
