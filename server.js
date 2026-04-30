@@ -3,17 +3,11 @@ const mqtt = require('mqtt');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const { Parser } = require('json2csv');
-const webpush = require('web-push');
 
 const app = express();
 app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
-
-// ===== THRESHOLDS =====
-const TEMP_LIMIT = 30;
-const CO_LIMIT = 50;
-const METHANE_LIMIT = 1000;
 
 // ===== USERS =====
 const USERS = {
@@ -23,21 +17,11 @@ const USERS = {
 
 let currentRole = "";
 
-// ===== VAPID =====
-const PUBLIC_KEY = "BAV36BWFZHKSJhaSxWvPeFODkdGTG5kZjn6uOZQtM0wrvcvLy4WRnNVwIJRYtMrCVAWrmx_4uF5We8G-YmX9rmU";
-const PRIVATE_KEY = "uOnrKBHB14vMBN7zPFqmi4XCQv4C2ZG2SGmzXHRcdvA";
-
-webpush.setVapidDetails(
-  "mailto:jpmandal123456@gmail.com",
-  PUBLIC_KEY,
-  PRIVATE_KEY
-);
-
 // ===== MONGO =====
 mongoose.connect(process.env.MONGO_URL)
 .then(()=>console.log("✅ MongoDB Connected"));
 
-// ===== MODELS =====
+// ===== MODEL =====
 const Data = mongoose.model("Data", {
   node:String,
   temp:Number,
@@ -47,25 +31,9 @@ const Data = mongoose.model("Data", {
   time:{type:Date,default:Date.now}
 });
 
-const Daily = mongoose.model("Daily", {
-  node:String,
-  temp:Number,
-  hum:Number,
-  co:Number,
-  methane:Number,
-  date:String
-});
-
-const Subscriber = mongoose.model("Subscriber", {
-  endpoint:String,
-  keys:Object
-});
-
 // ===== MEMORY =====
 let latestData = {};
 let buffer = {};
-let dailyBuffer = {};
-let lastAlertTime = 0;
 
 // ===== MQTT =====
 const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hivemq.cloud',{
@@ -78,8 +46,9 @@ client.on('connect',()=>{
   client.subscribe("pollution/#");
 });
 
+// ===== PROCESS DATA =====
 client.on('message', async (topic,msg)=>{
-  try {
+  try{
     let d = JSON.parse(msg.toString());
     d.time = new Date();
 
@@ -94,65 +63,17 @@ client.on('message', async (topic,msg)=>{
 
     let avg = {
       node,
-      temp: arr.reduce((s,x)=>s+x.temp,0)/arr.length,
-      hum: arr.reduce((s,x)=>s+x.hum,0)/arr.length,
-      co: arr.reduce((s,x)=>s+x.co,0)/arr.length,
-      methane: arr.reduce((s,x)=>s+x.methane,0)/arr.length,
+      temp: Number((arr.reduce((s,x)=>s+x.temp,0)/arr.length).toFixed(2)),
+      hum: Number((arr.reduce((s,x)=>s+x.hum,0)/arr.length).toFixed(2)),
+      co: Number((arr.reduce((s,x)=>s+x.co,0)/arr.length).toFixed(2)),
+      methane: Number((arr.reduce((s,x)=>s+x.methane,0)/arr.length).toFixed(2)),
       time:new Date()
     };
 
     latestData[node]=avg;
     await Data.create(avg);
 
-    // ===== DAILY AVG =====
-    let today = new Date().toISOString().slice(0,10);
-
-    if(!dailyBuffer[node]) dailyBuffer[node]=[];
-    dailyBuffer[node].push(avg);
-
-    if(dailyBuffer[node].length >= 1440){
-      let dArr = dailyBuffer[node];
-
-      let dailyAvg = {
-        node,
-        temp: dArr.reduce((s,x)=>s+x.temp,0)/dArr.length,
-        hum: dArr.reduce((s,x)=>s+x.hum,0)/dArr.length,
-        co: dArr.reduce((s,x)=>s+x.co,0)/dArr.length,
-        methane: dArr.reduce((s,x)=>s+x.methane,0)/dArr.length,
-        date: today
-      };
-
-      await Daily.create(dailyAvg);
-      dailyBuffer[node]=[];
-    }
-
-    // ===== ALERT =====
-    if(Date.now()-lastAlertTime>300000){
-      if(avg.temp>TEMP_LIMIT || avg.co>CO_LIMIT || avg.methane>METHANE_LIMIT){
-
-        lastAlertTime=Date.now();
-
-        const payload = JSON.stringify({
-          title: "🚨 Alert",
-          body: `${node} | Temp:${avg.temp}°C CO:${avg.co} CH4:${avg.methane}`
-        });
-
-        const subs = await Subscriber.find();
-        subs.forEach(sub=>{
-          webpush.sendNotification(sub,payload).catch(()=>{});
-        });
-      }
-    }
-
   } catch(e){}
-});
-
-// ===== SUBSCRIBE =====
-app.post('/subscribe-notification', async (req,res)=>{
-  const sub=req.body;
-  const exists=await Subscriber.findOne({endpoint:sub.endpoint});
-  if(!exists) await Subscriber.create(sub);
-  res.sendStatus(201);
 });
 
 // ===== LOGIN =====
@@ -227,87 +148,212 @@ res.send(`
 <html>
 <head>
 <title>IoT Dashboard</title>
+
 <style>
-body{font-family:Arial;background:#0f172a;color:white;text-align:center;}
-.container{display:flex;flex-wrap:wrap;justify-content:center;gap:20px;}
-.card{background:#1e293b;padding:20px;border-radius:15px;width:250px;}
+body { font-family: Arial; background:#0f172a; color:white; text-align:center; }
+button { padding:10px; margin:10px; background:#22c55e; border:none; color:white; cursor:pointer; }
+
+.container { display:flex; flex-wrap:wrap; justify-content:center; gap:20px; }
+
+.card {
+  background:#1e293b;
+  padding:20px;
+  border-radius:15px;
+  width:250px;
+}
+
+.circle {
+  width:120px;
+  height:120px;
+  border-radius:50%;
+  background:conic-gradient(#22c55e 0deg, #22c55e var(--deg), #334155 var(--deg));
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  margin:auto;
+}
+
+.inner {
+  width:90px;
+  height:90px;
+  border-radius:50%;
+  background:#0f172a;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.weather { font-size:40px; }
+
+table {
+  margin:auto;
+  width:80%;
+  border-collapse:collapse;
+}
+
+th, td {
+  border:1px solid white;
+  padding:10px;
+}
 </style>
 </head>
+
 <body>
 
 <h1>🌍 IoT Dashboard</h1>
-<button onclick="enableNotifications()">🔔 Enable Alerts</button>
 
 <div id="roleSelect">
-<button onclick="selectRole('admin')">Admin</button>
-<button onclick="selectRole('user')">User</button>
+  <button onclick="selectRole('admin')">👑 Admin</button>
+  <button onclick="selectRole('user')">👤 User</button>
 </div>
 
 <div id="loginBox" style="display:none;">
-<input id="u"><input id="p" type="password">
-<button onclick="login()">Login</button>
+  <h2 id="roleTitle"></h2>
+  <input id="u" placeholder="Username"><br>
+  <input id="p" type="password" placeholder="Password"><br>
+  <button onclick="login()">Login</button>
 </div>
 
 <div id="userUI" style="display:none;">
-<div class="container" id="cards"></div>
+  <h2>User Dashboard</h2>
+  <div class="container" id="cards"></div>
 </div>
 
 <div id="adminUI" style="display:none;">
-<button onclick="download()">Download CSV</button>
-<button onclick="reset()">Reset</button>
-<table border="1"><tbody id="table"></tbody></table>
+  <h2>Admin Dashboard</h2>
+  <button onclick="download()">Download CSV</button>
+  <button onclick="reset()">Reset DB</button>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Node</th>
+        <th>Temp</th>
+        <th>Hum</th>
+        <th>CO</th>
+        <th>CH4</th>
+        <th>Time</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="table"></tbody>
+  </table>
 </div>
 
 <script>
-const ALL_NODES=["node1","node2","node3"];
 
-function selectRole(r){roleSelect.style.display="none";loginBox.style.display="block";window.role=r;}
+const ALL_NODES = ["node1","node2","node3"];
+
+function getWeather(t){
+  if(t>35) return "☀️";
+  if(t>25) return "⛅";
+  if(t>15) return "☁️";
+  return "🌧";
+}
+
+let selectedRole="";
+
+function selectRole(role){
+  selectedRole=role;
+  roleSelect.style.display="none";
+  loginBox.style.display="block";
+  roleTitle.innerText=role.toUpperCase()+" LOGIN";
+}
 
 async function login(){
-let res=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u.value,password:p.value,role:role})});
-let d=await res.json();
-if(d.success){
-loginBox.style.display="none";
-if(role=="admin"){adminUI.style.display="block";loadAdmin();}
-else{userUI.style.display="block";loadUser();}
-}
+  let res=await fetch('/login',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:u.value,password:p.value,role:selectedRole})
+  });
+
+  let d=await res.json();
+
+  if(d.success){
+    loginBox.style.display='none';
+
+    if(selectedRole==="admin"){
+      adminUI.style.display="block";
+      loadAdmin();
+    } else {
+      userUI.style.display="block";
+      loadUser();
+    }
+  }
 }
 
 async function loadUser(){
-let res=await fetch('/api/data');let data=await res.json();
-let html="";
-ALL_NODES.forEach(n=>{
-if(data[n]){
-let d=data[n];
-html+=\`<div class="card"><h3>\${n}</h3>
-<p>Temp: \${d.temp}</p>
-<p>Hum: \${d.hum}</p>
-<p>CO: \${d.co}</p>
-<p>CH4: \${d.methane}</p></div>\`;
-}else{
-html+=\`<div class="card"><h3>\${n}</h3>⚠️ Repair</div>\`;
-}});
-cards.innerHTML=html;
-setTimeout(loadUser,2000);
+  let res=await fetch('/api/data');
+  let data=await res.json();
+
+  let html="";
+
+  ALL_NODES.forEach(n=>{
+    if(data[n]){
+      let d=data[n];
+      let deg=(d.temp/50)*360;
+
+      html+=\`
+      <div class="card">
+        <h3>\${n}</h3>
+        <div class="weather">\${getWeather(d.temp)}</div>
+        <div class="circle" style="--deg:\${deg}deg">
+          <div class="inner">\${d.temp}°C</div>
+        </div>
+        <p>💧 \${d.hum}%</p>
+        <p>🟡 CO: \${d.co}</p>
+        <p>🟢 CH4: \${d.methane}</p>
+      </div>\`;
+    } else {
+      html+=\`
+      <div class="card">
+        <h3>\${n}</h3>
+        <div style="color:orange;">⚠️ Node under repair</div>
+      </div>\`;
+    }
+  });
+
+  cards.innerHTML=html;
+  setTimeout(loadUser,2000);
 }
 
 async function loadAdmin(){
-let res=await fetch('/api/data');let data=await res.json();
-let html="";
-ALL_NODES.forEach(n=>{
-if(data[n]){
-let d=data[n];
-html+=\`<tr><td>\${n}</td><td>\${d.temp}</td><td>\${d.hum}</td><td>\${d.co}</td><td>\${d.methane}</td><td><button onclick="del('\${n}')">Clear</button></td></tr>\`;
-}else{
-html+=\`<tr><td>\${n}</td><td colspan="4">Repair</td></tr>\`;
-}});
-table.innerHTML=html;
-setTimeout(loadAdmin,3000);
+  let res=await fetch('/api/data');
+  let data=await res.json();
+
+  let html="";
+
+  ALL_NODES.forEach(n=>{
+    if(data[n]){
+      let d=data[n];
+
+      html+=\`
+      <tr>
+        <td>\${n}</td>
+        <td>\${d.temp}</td>
+        <td>\${d.hum}</td>
+        <td>\${d.co}</td>
+        <td>\${d.methane}</td>
+        <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
+        <td><button onclick="del('\${n}')">Clear</button></td>
+      </tr>\`;
+    } else {
+      html+=\`
+      <tr>
+        <td>\${n}</td>
+        <td colspan="5">⚠️ Repair</td>
+      </tr>\`;
+    }
+  });
+
+  table.innerHTML=html;
+  setTimeout(loadAdmin,3000);
 }
 
-function reset(){fetch('/reset');}
-function del(n){fetch('/delete/'+n);}
-function download(){window.location='/download';}
+function reset(){ fetch('/reset'); }
+function del(n){ fetch('/delete/'+n); }
+function download(){ window.location='/download'; }
+
 </script>
 
 </body>
