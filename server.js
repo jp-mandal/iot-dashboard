@@ -38,7 +38,8 @@ let currentRole = "";
 
 // ===== MONGO =====
 mongoose.connect(process.env.MONGO_URL)
-.then(()=>console.log("✅ MongoDB Connected"));
+.then(()=>console.log("✅ MongoDB Connected"))
+.catch(err=>console.log(err));
 
 // ===== MODELS =====
 const Data = mongoose.model("Data", {
@@ -71,7 +72,10 @@ const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hive
   password:'Climate@2'
 });
 
-client.on('connect',()=>client.subscribe("pollution/#"));
+client.on('connect',()=>{
+  console.log("✅ MQTT Connected");
+  client.subscribe("pollution/#");
+});
 
 // ===== MESSAGE =====
 client.on('message', async (topic,msg)=>{
@@ -83,6 +87,7 @@ client.on('message', async (topic,msg)=>{
     // ===== 1 MIN AVG =====
     if(!buffer[node]) buffer[node]=[];
     buffer[node].push(d);
+
     buffer[node]=buffer[node].filter(x=>Date.now()-new Date(x.time)<60000);
 
     let arr = buffer[node];
@@ -121,7 +126,7 @@ client.on('message', async (topic,msg)=>{
       dailyBuffer[node]=[];
     }
 
-    // ===== PUSH ALERT =====
+    // ===== ALERT =====
     if(Date.now()-lastAlertTime > 300000){
       if(avg.temp>=TEMP_LIMIT || avg.co>=CO_LIMIT || avg.methane>=METHANE_LIMIT){
 
@@ -138,7 +143,9 @@ client.on('message', async (topic,msg)=>{
       }
     }
 
-  }catch(e){}
+  }catch(e){
+    console.log(e.message);
+  }
 });
 
 // ===== SUBSCRIBE =====
@@ -150,10 +157,15 @@ app.post('/subscribe',(req,res)=>{
 // ===== LOGIN =====
 app.post('/login',(req,res)=>{
   const {username,password,role}=req.body;
-  if(USERS[username] && USERS[username].password===password && USERS[username].role===role){
+
+  if(USERS[username] &&
+     USERS[username].password===password &&
+     USERS[username].role===role){
     currentRole=role;
     res.json({success:true});
-  } else res.json({success:false});
+  } else {
+    res.json({success:false});
+  }
 });
 
 // ===== API =====
@@ -168,6 +180,22 @@ app.get('/api/data',(req,res)=>{
   }
 
   res.json(out);
+});
+
+// ===== ADMIN =====
+app.get('/reset',async(req,res)=>{
+  if(currentRole!=="admin") return res.send("Unauthorized");
+  await Data.deleteMany({});
+  await Daily.deleteMany({});
+  latestData={};
+  res.send("Cleared");
+});
+
+app.get('/delete/:node',async(req,res)=>{
+  if(currentRole!=="admin") return res.send("Unauthorized");
+  await Data.deleteMany({node:req.params.node});
+  delete latestData[req.params.node];
+  res.send("Deleted");
 });
 
 // ===== CSV =====
@@ -206,33 +234,21 @@ app.get('/download',async(req,res)=>{
 
 // ===== UI =====
 app.get('/',(req,res)=>{
-res.send(`
-<!DOCTYPE html>
+res.send(`<!DOCTYPE html>
 <html>
 <head>
 <title>IoT Dashboard</title>
-
 <link rel="manifest" href="/manifest.json">
-
 <style>
-body { background:#0f172a; color:white; text-align:center; }
-button { padding:10px; margin:10px; background:#22c55e; border:none; color:white; }
-
+body { font-family: Arial; background:#0f172a; color:white; text-align:center; }
+button { padding:10px; margin:10px; background:#22c55e; border:none; color:white; cursor:pointer; }
 .container { display:flex; flex-wrap:wrap; justify-content:center; gap:20px; }
-
 .card { background:#1e293b; padding:20px; border-radius:15px; width:250px; }
-
-.circle {
-  width:120px;height:120px;border-radius:50%;
-  background:conic-gradient(#22c55e 0deg,#22c55e var(--deg),#334155 var(--deg));
-  display:flex;align-items:center;justify-content:center;margin:auto;
-}
-
-.inner {
-  width:90px;height:90px;border-radius:50%;
-  background:#0f172a;display:flex;align-items:center;justify-content:center;
-}
-
+.circle { width:120px;height:120px;border-radius:50%;
+background:conic-gradient(#22c55e 0deg,#22c55e var(--deg),#334155 var(--deg));
+display:flex;align-items:center;justify-content:center;margin:auto;}
+.inner { width:90px;height:90px;border-radius:50%;background:#0f172a;
+display:flex;align-items:center;justify-content:center;}
 .weather { font-size:40px; }
 </style>
 </head>
@@ -240,7 +256,6 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
 <body>
 
 <h1>🌍 IoT Dashboard</h1>
-
 <button onclick="enableNotifications()">🔔 Enable Alerts</button>
 
 <div id="roleSelect">
@@ -249,7 +264,9 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
 </div>
 
 <div id="loginBox" style="display:none;">
-<input id="u"><input id="p" type="password">
+<h2 id="roleTitle"></h2>
+<input id="u"><br>
+<input id="p" type="password"><br>
 <button onclick="login()">Login</button>
 </div>
 
@@ -257,72 +274,106 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
 <div class="container" id="cards"></div>
 </div>
 
+<div id="adminUI" style="display:none;">
+<button onclick="download()">Download CSV</button>
+<button onclick="reset()">Reset DB</button>
+<table id="table"></table>
+</div>
+
 <script>
+
 const PUBLIC_KEY = "${PUBLIC_KEY}";
+let selectedRole="";
 
 async function enableNotifications(){
-  const reg = await navigator.serviceWorker.register('/sw.js');
-  const sub = await reg.pushManager.subscribe({
-    userVisibleOnly:true,
-    applicationServerKey:urlBase64ToUint8Array(PUBLIC_KEY)
-  });
-
-  await fetch('/subscribe',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(sub)
-  });
-
-  alert("Notifications Enabled!");
+const reg=await navigator.serviceWorker.register('/sw.js');
+const sub=await reg.pushManager.subscribe({
+userVisibleOnly:true,
+applicationServerKey:urlBase64ToUint8Array(PUBLIC_KEY)
+});
+await fetch('/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sub)});
+alert("Enabled");
 }
 
 function urlBase64ToUint8Array(base64String){
-  const padding='='.repeat((4-base64String.length%4)%4);
-  const base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');
-  const raw=window.atob(base64);
-  return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+const padding='='.repeat((4-base64String.length%4)%4);
+const base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');
+const raw=window.atob(base64);
+return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+}
+
+function selectRole(role){
+selectedRole=role;
+document.getElementById("roleSelect").style.display="none";
+document.getElementById("loginBox").style.display="block";
+document.getElementById("roleTitle").innerText=role.toUpperCase()+" LOGIN";
+}
+
+async function login(){
+let res=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({username:u.value,password:p.value,role:selectedRole})});
+let d=await res.json();
+
+if(d.success){
+document.getElementById("loginBox").style.display='none';
+if(selectedRole==="admin"){document.getElementById("adminUI").style.display="block";loadAdmin();}
+else {document.getElementById("userUI").style.display="block";loadUser();}
+}else alert("Wrong");
 }
 
 function getWeather(t){
-  if(t>35) return "☀️";
-  if(t>25) return "⛅";
-  if(t>15) return "☁️";
-  return "🌧";
+if(t>35) return "☀️";
+if(t>25) return "⛅";
+if(t>15) return "☁️";
+return "🌧";
 }
 
 async function loadUser(){
-  let r=await fetch('/api/data');
-  let d=await r.json();
-  let html="";
+let r=await fetch('/api/data');
+let d=await r.json();
+let html="";
 
-  ["node1","node2","node3"].forEach(n=>{
-    if(d[n]){
-      let deg=(d[n].temp/50)*360;
-      html+=\`
-      <div class="card">
-      <h3>\${n}</h3>
-      <div class="weather">\${getWeather(d[n].temp)}</div>
-      <div class="circle" style="--deg:\${deg}deg">
-      <div class="inner">\${d[n].temp}°C</div></div>
-      <p>💧 \${d[n].hum}%</p>
-      <p>🟡 CO: \${d[n].co}</p>
-      <p>🟢 CH4: \${d[n].methane}</p>
-      </div>\`;
-    } else {
-      html+=\`<div class="card"><h3>\${n}</h3>⚠️ Repair</div>\`;
-    }
-  });
+["node1","node2","node3"].forEach(n=>{
+if(d[n]){
+let deg=(d[n].temp/50)*360;
+html+=\`<div class="card"><h3>\${n}</h3>
+<div class="weather">\${getWeather(d[n].temp)}</div>
+<div class="circle" style="--deg:\${deg}deg"><div class="inner">\${d[n].temp}°C</div></div>
+<p>💧 \${d[n].hum}%</p>
+<p>🟡 CO: \${d[n].co}</p>
+<p>🟢 CH4: \${d[n].methane}</p></div>\`;
+}else html+=\`<div class="card"><h3>\${n}</h3>⚠️ Repair</div>\`;
+});
 
-  cards.innerHTML=html;
-  setTimeout(loadUser,2000);
+cards.innerHTML=html;
+setTimeout(loadUser,2000);
 }
 
-loadUser();
-</script>
+async function loadAdmin(){
+let r=await fetch('/api/data');
+let d=await r.json();
+let html="";
 
+["node1","node2","node3"].forEach(n=>{
+if(d[n]){
+let x=d[n];
+html+=\`<tr><td>\${n}</td><td>\${x.temp}</td><td>\${x.hum}</td><td>\${x.co}</td><td>\${x.methane}</td>
+<td>\${new Date(x.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
+<td><button onclick="del('\${n}')">Clear</button></td></tr>\`;
+}else html+=\`<tr><td>\${n}</td><td colspan="5">Repair</td></tr>\`;
+});
+
+document.getElementById("table").innerHTML=html;
+setTimeout(loadAdmin,3000);
+}
+
+function reset(){fetch('/reset');}
+function del(n){fetch('/delete/'+n);}
+function download(){window.location='/download';}
+
+</script>
 </body>
-</html>
-`);
+</html>`);
 });
 
 app.listen(PORT,()=>console.log("🚀 Running"));
