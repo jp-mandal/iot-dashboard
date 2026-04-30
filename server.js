@@ -9,6 +9,11 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
+// ===== THRESHOLDS =====
+const TEMP_LIMIT = 30;
+const CO_LIMIT = 30;
+const METHANE_LIMIT = 500;
+
 // ===== USERS =====
 const USERS = {
   admin: { password: "1234", role: "admin" },
@@ -21,7 +26,7 @@ let currentRole = "";
 mongoose.connect(process.env.MONGO_URL)
 .then(()=>console.log("✅ MongoDB Connected"));
 
-// ===== MODEL =====
+// ===== MODELS =====
 const Data = mongoose.model("Data", {
   node:String,
   temp:Number,
@@ -31,9 +36,20 @@ const Data = mongoose.model("Data", {
   time:{type:Date,default:Date.now}
 });
 
+const Daily = mongoose.model("Daily", {
+  node:String,
+  temp:Number,
+  hum:Number,
+  co:Number,
+  methane:Number,
+  date:String
+});
+
 // ===== MEMORY =====
 let latestData = {};
 let buffer = {};
+let dailyBuffer = {};
+let lastAlertTime = 0;
 
 // ===== MQTT =====
 const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hivemq.cloud',{
@@ -46,7 +62,7 @@ client.on('connect',()=>{
   client.subscribe("pollution/#");
 });
 
-// ===== PROCESS DATA =====
+// ===== DATA PROCESS =====
 client.on('message', async (topic,msg)=>{
   try{
     let d = JSON.parse(msg.toString());
@@ -54,6 +70,7 @@ client.on('message', async (topic,msg)=>{
 
     let node = d.node;
 
+    // ===== 1 MIN BUFFER =====
     if(!buffer[node]) buffer[node]=[];
     buffer[node].push(d);
 
@@ -73,7 +90,42 @@ client.on('message', async (topic,msg)=>{
     latestData[node]=avg;
     await Data.create(avg);
 
-  } catch(e){}
+    // ===== DAILY BUFFER =====
+    let today = new Date().toISOString().slice(0,10);
+
+    if(!dailyBuffer[node]) dailyBuffer[node]=[];
+    dailyBuffer[node].push(avg);
+
+    if(dailyBuffer[node].length >= 1440){
+
+      let dArr = dailyBuffer[node];
+
+      let dailyAvg = {
+        node,
+        temp: Number((dArr.reduce((s,x)=>s+x.temp,0)/dArr.length).toFixed(2)),
+        hum: Number((dArr.reduce((s,x)=>s+x.hum,0)/dArr.length).toFixed(2)),
+        co: Number((dArr.reduce((s,x)=>s+x.co,0)/dArr.length).toFixed(2)),
+        methane: Number((dArr.reduce((s,x)=>s+x.methane,0)/dArr.length).toFixed(2)),
+        date: today
+      };
+
+      await Daily.create(dailyAvg);
+      dailyBuffer[node] = [];
+    }
+
+    // ===== ALERT =====
+    if(Date.now()-lastAlertTime > 300000){
+      if(
+        avg.temp >= TEMP_LIMIT ||
+        avg.co >= CO_LIMIT ||
+        avg.methane >= METHANE_LIMIT
+      ){
+        lastAlertTime = Date.now();
+        console.log("🚨 ALERT:", avg);
+      }
+    }
+
+  }catch(e){}
 });
 
 // ===== LOGIN =====
@@ -104,6 +156,7 @@ app.get('/api/data',(req,res)=>{
 app.get('/reset',async(req,res)=>{
   if(currentRole!=="admin") return res.send("Unauthorized");
   await Data.deleteMany({});
+  await Daily.deleteMany({});
   latestData={};
   res.send("Cleared");
 });
@@ -115,22 +168,37 @@ app.get('/delete/:node',async(req,res)=>{
   res.send("Deleted");
 });
 
-// ===== CSV =====
+// ===== CSV (MIN + DAILY IN SAME FILE) =====
 app.get('/download',async(req,res)=>{
   if(currentRole!=="admin") return res.send("Unauthorized");
 
   let data=await Data.find().sort({time:1});
+  let daily=await Daily.find();
+
   let rows={};
 
+  // ===== MINUTE DATA =====
   data.forEach(d=>{
     let t=new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"});
 
-    if(!rows[t]) rows[t]={Time:t};
+    if(!rows[t]) rows[t]={Type:"Minute", Time:t};
 
     rows[t][`${d.node}_Temp`]=d.temp;
     rows[t][`${d.node}_Hum`]=d.hum;
     rows[t][`${d.node}_CO`]=d.co;
     rows[t][`${d.node}_Methane`]=d.methane;
+  });
+
+  // ===== DAILY DATA =====
+  daily.forEach(d=>{
+    let key = "DAY_"+d.date;
+
+    if(!rows[key]) rows[key]={Type:"Daily Avg", Time:d.date};
+
+    rows[key][`${d.node}_Temp`]=d.temp;
+    rows[key][`${d.node}_Hum`]=d.hum;
+    rows[key][`${d.node}_CO`]=d.co;
+    rows[key][`${d.node}_Methane`]=d.methane;
   });
 
   const parser=new Parser();
@@ -141,9 +209,10 @@ app.get('/download',async(req,res)=>{
   res.send(csv);
 });
 
-// ===== UI =====
+// ===== UI (UNCHANGED) =====
 app.get('/',(req,res)=>{
 res.send(`
+
 <!DOCTYPE html>
 <html>
 <head>
@@ -358,6 +427,7 @@ function download(){ window.location='/download'; }
 
 </body>
 </html>
+
 `);
 });
 
