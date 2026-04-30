@@ -10,22 +10,15 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ===== PUSH KEYS =====
+// ===== VAPID =====
 const PUBLIC_KEY = "BAV36BWFZHKSJhaSxWvPeFODkdGTG5kZjn6uOZQtM0wrvcvLy4WRnNVwIJRYtMrCVAWrmx_4uF5We8G-YmX9rmU";
 const PRIVATE_KEY = "uOnrKBHB14vMBN7zPFqmi4XCQv4C2ZG2SGmzXHRcdvA";
 
 webpush.setVapidDetails(
-  'mailto:jpmandal123456@gmail.com',
+  "mailto:jpmandal123456@gmail.com",
   PUBLIC_KEY,
   PRIVATE_KEY
 );
-
-let subscribers = [];
-
-// ===== THRESHOLDS =====
-const TEMP_LIMIT = 30;
-const CO_LIMIT = 30;
-const METHANE_LIMIT = 500;
 
 // ===== USERS =====
 const USERS = {
@@ -38,170 +31,168 @@ let currentRole = "";
 // ===== MONGO =====
 mongoose.connect(process.env.MONGO_URL);
 
-// ===== MODELS =====
+// ===== MODEL =====
 const Data = mongoose.model("Data", {
-  node:String,
-  temp:Number,
-  hum:Number,
-  co:Number,
-  methane:Number,
-  time:{type:Date,default:Date.now}
+  node: String,
+  temp: Number,
+  hum: Number,
+  gas: Number,
+  time: { type: Date, default: Date.now }
 });
 
-const Daily = mongoose.model("Daily", {
-  node:String,
-  temp:Number,
-  hum:Number,
-  co:Number,
-  methane:Number,
-  date:String
+const Subscriber = mongoose.model("Subscriber", {
+  endpoint: String,
+  keys: Object
 });
 
 // ===== MEMORY =====
 let latestData = {};
 let buffer = {};
-let dailyBuffer = {};
+let lastStoredTime = {};
 let lastAlertTime = 0;
 
 // ===== MQTT =====
-const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hivemq.cloud',{
-  username:'climate',
-  password:'Climate@2'
+const client = mqtt.connect('mqtts://7564b99907f74747bac93aa42ec8f77b.s1.eu.hivemq.cloud', {
+  username: 'climate',
+  password: 'Climate@2'
 });
 
-client.on('connect',()=>client.subscribe("pollution/#"));
+client.on('connect', () => {
+  console.log("✅ MQTT Connected");
+  client.subscribe("pollution/#");
+});
 
-client.on('message', async (topic,msg)=>{
-  try{
-    let d = JSON.parse(msg.toString());
-    d.time = new Date();
-    let node = d.node;
+// ===== DATA PROCESS =====
+client.on('message', async (topic, message) => {
+  try {
+    let text = message.toString();
+    if (!text.startsWith("{")) return;
 
-    // ===== 1 MIN AVG =====
-    if(!buffer[node]) buffer[node]=[];
-    buffer[node].push(d);
-    buffer[node]=buffer[node].filter(x=>Date.now()-new Date(x.time)<60000);
+    const data = JSON.parse(text);
+    data.time = new Date();
 
-    let arr = buffer[node];
+    const node = data.node;
 
-    let avg = {
-      node,
-      temp:Number((arr.reduce((s,x)=>s+x.temp,0)/arr.length).toFixed(2)),
-      hum:Number((arr.reduce((s,x)=>s+x.hum,0)/arr.length).toFixed(2)),
-      co:Number((arr.reduce((s,x)=>s+x.co,0)/arr.length).toFixed(2)),
-      methane:Number((arr.reduce((s,x)=>s+x.methane,0)/arr.length).toFixed(2)),
-      time:new Date()
-    };
+    if (!buffer[node]) buffer[node] = [];
+    buffer[node].push(data);
 
-    latestData[node]=avg;
-    await Data.create(avg);
+    buffer[node] = buffer[node].filter(d =>
+      (Date.now() - new Date(d.time)) < 60000
+    );
 
-    // ===== DAILY AVG =====
-    let today = new Date().toISOString().slice(0,10);
+    if (!lastStoredTime[node] || (Date.now() - lastStoredTime[node] > 60000)) {
 
-    if(!dailyBuffer[node]) dailyBuffer[node]=[];
-    dailyBuffer[node].push(avg);
+      const arr = buffer[node];
 
-    if(dailyBuffer[node].length >= 1440){
-      let dArr = dailyBuffer[node];
-
-      await Daily.create({
+      const avgData = {
         node,
-        temp:(dArr.reduce((s,x)=>s+x.temp,0)/dArr.length).toFixed(2),
-        hum:(dArr.reduce((s,x)=>s+x.hum,0)/dArr.length).toFixed(2),
-        co:(dArr.reduce((s,x)=>s+x.co,0)/dArr.length).toFixed(2),
-        methane:(dArr.reduce((s,x)=>s+x.methane,0)/dArr.length).toFixed(2),
-        date:today
-      });
+        temp: Number((arr.reduce((s,d)=>s+d.temp,0)/arr.length).toFixed(2)),
+        hum: Number((arr.reduce((s,d)=>s+d.hum,0)/arr.length).toFixed(2)),
+        gas: Math.round(arr.reduce((s,d)=>s+d.gas,0)/arr.length),
+        time: new Date()
+      };
 
-      dailyBuffer[node]=[];
-    }
+      latestData[node] = avgData;
+      await Data.create(avgData);
 
-    // ===== ALERT =====
-    if(Date.now()-lastAlertTime>300000){
-      if(avg.temp>=TEMP_LIMIT || avg.co>=CO_LIMIT || avg.methane>=METHANE_LIMIT){
+      lastStoredTime[node] = Date.now();
+
+      // ===== ALERT =====
+      if ((Date.now() - lastAlertTime > 300000) && avgData.temp > 30) {
 
         lastAlertTime = Date.now();
 
         const payload = JSON.stringify({
-          title: "🚨 Pollution Alert",
-          body: `${node} Temp:${avg.temp}°C CO:${avg.co} CH4:${avg.methane}`
+          title: "🔥 Temperature Alert",
+          body: `${node}: ${avgData.temp}°C`
         });
 
-        subscribers.forEach(sub=>{
-          webpush.sendNotification(sub,payload).catch(()=>{});
+        const subs = await Subscriber.find();
+
+        subs.forEach(sub => {
+          webpush.sendNotification(sub, payload).catch(()=>{});
         });
       }
     }
 
-  }catch(e){}
+  } catch (err) {
+    console.log(err.message);
+  }
 });
 
 // ===== SUBSCRIBE =====
-app.post('/subscribe',(req,res)=>{
-  subscribers.push(req.body);
+app.post('/subscribe-notification', async (req, res) => {
+  const sub = req.body;
+  const exists = await Subscriber.findOne({ endpoint: sub.endpoint });
+  if (!exists) await Subscriber.create(sub);
   res.sendStatus(201);
 });
 
 // ===== LOGIN =====
-app.post('/login',(req,res)=>{
-  const {username,password,role}=req.body;
+app.post('/login', (req, res) => {
+  const { username, password, role } = req.body;
 
-  if(USERS[username] &&
-     USERS[username].password===password &&
-     USERS[username].role===role){
-    currentRole=role;
-    res.json({success:true});
-  } else res.json({success:false});
+  if (USERS[username] &&
+      USERS[username].password === password &&
+      USERS[username].role === role) {
+
+    currentRole = role;
+    res.json({ success: true });
+
+  } else res.json({ success: false });
 });
 
 // ===== API =====
-app.get('/api/data',(req,res)=>{
-  let now=Date.now();
-  let out={};
+app.get('/api/data', (req, res) => {
+  const now = new Date();
+  let filtered = {};
 
-  for(let n of ["node1","node2","node3"]){
-    if(latestData[n] && (now-new Date(latestData[n].time)<120000)){
-      out[n]=latestData[n];
-    } else {
-      out[n]={repair:true,node:n};
+  for (let node of ["node1","node2","node3"]) {
+    if (latestData[node] && (now - new Date(latestData[node].time)) < 120000) {
+      filtered[node] = latestData[node];
     }
   }
 
-  res.json(out);
+  res.json(filtered);
+});
+
+// ===== ADMIN =====
+app.get('/reset', async (req, res) => {
+  if (currentRole !== "admin") return res.send("Unauthorized");
+  await Data.deleteMany({});
+  latestData = {};
+  res.send("Database Cleared");
+});
+
+app.get('/delete/:node', async (req, res) => {
+  if (currentRole !== "admin") return res.send("Unauthorized");
+  const node = req.params.node;
+  await Data.deleteMany({ node });
+  delete latestData[node];
+  res.send("Node Deleted");
 });
 
 // ===== CSV =====
-app.get('/download',async(req,res)=>{
-  if(currentRole!=="admin") return res.send("Unauthorized");
+app.get('/download', async (req, res) => {
+  if (currentRole !== "admin") return res.send("Unauthorized");
 
-  let data=await Data.find();
-  let daily=await Daily.find();
+  const data = await Data.find().sort({ time: 1 });
+  let rows = {};
 
-  let rows={};
+  data.forEach(d => {
+    let time = new Date(d.time).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata"
+    });
 
-  data.forEach(d=>{
-    let t=new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"});
-    if(!rows[t]) rows[t]={Type:"Minute",Time:t};
+    if (!rows[time]) rows[time] = { Time: time };
 
-    rows[t][`${d.node}_Temp`]=d.temp;
-    rows[t][`${d.node}_Hum`]=d.hum;
-    rows[t][`${d.node}_CO`]=d.co;
-    rows[t][`${d.node}_Methane`]=d.methane;
+    rows[time][`${d.node}_Temp`] = d.temp;
+    rows[time][`${d.node}_Hum`] = d.hum;
+    rows[time][`${d.node}_Gas`] = d.gas;
   });
 
-  daily.forEach(d=>{
-    let key="DAY_"+d.date;
-    if(!rows[key]) rows[key]={Type:"Daily Avg",Time:d.date};
-
-    rows[key][`${d.node}_Temp`]=d.temp;
-    rows[key][`${d.node}_Hum`]=d.hum;
-    rows[key][`${d.node}_CO`]=d.co;
-    rows[key][`${d.node}_Methane`]=d.methane;
-  });
-
-  const parser=new Parser();
-  res.attachment("iot.csv");
+  const parser = new Parser();
+  res.attachment('iot_data.csv');
   res.send(parser.parse(Object.values(rows)));
 });
 
@@ -249,13 +240,24 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
 }
 
 .weather { font-size:40px; }
+
+table {
+  margin:auto;
+  width:80%;
+  border-collapse:collapse;
+}
+
+th, td {
+  border:1px solid white;
+  padding:10px;
+}
 </style>
 </head>
 
 <body>
 
 <h1>🌍 IoT Dashboard</h1>
-<button onclick="enableAlerts()">🔔 Enable Alerts</button>
+<button onclick="enableNotifications()">🔔 Enable Alerts</button>
 
 <div id="roleSelect">
   <button onclick="selectRole('admin')">👑 Admin</button>
@@ -270,18 +272,60 @@ button { padding:10px; margin:10px; background:#22c55e; border:none; color:white
 </div>
 
 <div id="userUI" style="display:none;">
+  <h2>User Dashboard</h2>
   <div class="container" id="cards"></div>
 </div>
 
 <div id="adminUI" style="display:none;">
+  <h2>Admin Dashboard</h2>
   <button onclick="download()">Download CSV</button>
   <button onclick="reset()">Reset DB</button>
-  <table border="1" style="margin:auto;">
+
+  <table>
+    <thead>
+      <tr>
+        <th>Node</th>
+        <th>Temp</th>
+        <th>Hum</th>
+        <th>Gas</th>
+        <th>Time</th>
+        <th>Action</th>
+      </tr>
+    </thead>
     <tbody id="table"></tbody>
   </table>
 </div>
 
 <script>
+
+const ALL_NODES = ["node1","node2","node3"];
+const publicKey = "${PUBLIC_KEY}";
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+}
+
+async function enableNotifications(){
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") return alert("Permission denied");
+
+  const sw = await navigator.serviceWorker.register('/sw.js');
+  const sub = await sw.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(publicKey)
+  });
+
+  await fetch('/subscribe-notification',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(sub)
+  });
+
+  alert("✅ Notifications Enabled");
+}
 
 let selectedRole="";
 
@@ -303,6 +347,7 @@ async function login(){
 
   if(d.success){
     loginBox.style.display='none';
+
     if(selectedRole==="admin"){
       adminUI.style.display="block";
       loadAdmin();
@@ -321,106 +366,87 @@ function getWeather(t){
 }
 
 async function loadUser(){
-  let res=await fetch('/api/data');
-  let data=await res.json();
+  let res = await fetch('/api/data');
+  let data = await res.json();
 
-  let html="";
+  let html = "";
 
-  for(let n in data){
-    let d=data[n];
+  ALL_NODES.forEach(n=>{
+    if(data[n]){
+      let d=data[n];
+      let deg=(d.temp/50)*360;
 
-    if(d.repair){
+      html+=\`
+      <div class="card">
+        <h3>\${d.node}</h3>
+        <div class="weather">\${getWeather(d.temp)}</div>
+        <div class="circle" style="--deg:\${deg}deg">
+          <div class="inner">\${d.temp}°C</div>
+        </div>
+        <p>💧 \${d.hum}%</p>
+        <p>💨 \${d.gas}</p>
+      </div>\`;
+    } else {
       html+=\`
       <div class="card">
         <h3>\${n}</h3>
-        <p>🛠 Node in repair</p>
+        <div style="color:orange;">
+          ⚠️ Node under repair<br>
+          Service available soon
+        </div>
       </div>\`;
-      continue;
     }
-
-    let deg=(d.temp/50)*360;
-
-    html+=\`
-    <div class="card">
-      <h3>\${d.node}</h3>
-      <div class="weather">\${getWeather(d.temp)}</div>
-      <div class="circle" style="--deg:\${deg}deg">
-        <div class="inner">\${d.temp.toFixed(2)}°C</div>
-      </div>
-      <p>💧 \${d.hum.toFixed(2)}%</p>
-      <p>🧪 CO: \${d.co.toFixed(2)}</p>
-      <p>🔥 CH4: \${d.methane.toFixed(2)}</p>
-    </div>\`;
-  }
+  });
 
   cards.innerHTML=html;
   setTimeout(loadUser,2000);
 }
 
 async function loadAdmin(){
-  let res=await fetch('/api/data');
-  let data=await res.json();
+  let res = await fetch('/api/data');
+  let data = await res.json();
 
   let html="";
-  for(let n in data){
-    let d=data[n];
 
-    if(d.repair){
-      html+=\`<tr><td>\${n}</td><td colspan="4">Repair</td></tr>\`;
-      continue;
+  ALL_NODES.forEach(n=>{
+    if(data[n]){
+      let d=data[n];
+
+      html+=\`
+      <tr>
+        <td>\${d.node}</td>
+        <td>\${d.temp}</td>
+        <td>\${d.hum}</td>
+        <td>\${d.gas}</td>
+        <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
+        <td><button onclick="del('\${d.node}')">Clear</button></td>
+      </tr>\`;
+    } else {
+      html+=\`
+      <tr>
+        <td>\${n}</td>
+        <td colspan="4" style="color:orange;">⚠️ Node under repair</td>
+        <td>-</td>
+      </tr>\`;
     }
-
-    html+=\`
-    <tr>
-      <td>\${d.node}</td>
-      <td>\${d.temp.toFixed(2)}</td>
-      <td>\${d.hum.toFixed(2)}</td>
-      <td>\${d.co.toFixed(2)}</td>
-      <td>\${d.methane.toFixed(2)}</td>
-    </tr>\`;
-  }
+  });
 
   table.innerHTML=html;
   setTimeout(loadAdmin,3000);
 }
 
+function reset(){ fetch('/reset'); }
+function del(n){ fetch('/delete/'+n); }
 function download(){ window.location='/download'; }
-
-// ===== ALERT =====
-async function enableAlerts(){
-  const permission = await Notification.requestPermission();
-  if(permission !== 'granted') return alert("Permission denied");
-
-  const reg = await navigator.serviceWorker.register('/sw.js');
-
-  const sub = await reg.pushManager.subscribe({
-    userVisibleOnly:true,
-    applicationServerKey: urlBase64ToUint8Array("${PUBLIC_KEY}")
-  });
-
-  await fetch('/subscribe',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(sub)
-  });
-
-  alert("Alerts Enabled!");
-}
-
-function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = window.atob(base64);
-  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
-}
 
 </script>
 
 </body>
 </html>
-
 `);
 });
 
 // ===== START =====
-app.listen(PORT, () => console.log("🚀 Running"));
+app.listen(PORT, () => {
+  console.log("🚀 Running on port", PORT);
+});
