@@ -31,12 +31,13 @@ let currentRole = "";
 // ===== MONGO =====
 mongoose.connect(process.env.MONGO_URL);
 
-// ===== MODEL =====
+// ===== MODELS =====
 const Data = mongoose.model("Data", {
   node: String,
   temp: Number,
   hum: Number,
-  gas: Number,
+  co: Number,
+  methane: Number,
   time: { type: Date, default: Date.now }
 });
 
@@ -68,14 +69,24 @@ client.on('message', async (topic, message) => {
     let text = message.toString();
     if (!text.startsWith("{")) return;
 
-    const data = JSON.parse(text);
+    let data = JSON.parse(text);
+
+    // ===== FIX: prevent undefined
+    data.temp = Number(data.temp) || 0;
+    data.hum = Number(data.hum) || 0;
+    data.co = Number(data.co) || 0;
+    data.methane = Number(data.methane) || 0;
+
     data.time = new Date();
+
+    console.log("📩 DATA:", data);
 
     const node = data.node;
 
     if (!buffer[node]) buffer[node] = [];
     buffer[node].push(data);
 
+    // keep last 1 min
     buffer[node] = buffer[node].filter(d =>
       (Date.now() - new Date(d.time)) < 60000
     );
@@ -86,9 +97,10 @@ client.on('message', async (topic, message) => {
 
       const avgData = {
         node,
-        temp: Number((arr.reduce((s,d)=>s+d.temp,0)/arr.length).toFixed(2)),
-        hum: Number((arr.reduce((s,d)=>s+d.hum,0)/arr.length).toFixed(2)),
-        gas: Math.round(arr.reduce((s,d)=>s+d.gas,0)/arr.length),
+        temp: Number((arr.reduce((s,x)=>s+(Number(x.temp)||0),0)/arr.length).toFixed(2)),
+        hum: Number((arr.reduce((s,x)=>s+(Number(x.hum)||0),0)/arr.length).toFixed(2)),
+        co: Number((arr.reduce((s,x)=>s+(Number(x.co)||0),0)/arr.length).toFixed(2)),
+        methane: Number((arr.reduce((s,x)=>s+(Number(x.methane)||0),0)/arr.length).toFixed(2)),
         time: new Date()
       };
 
@@ -97,7 +109,7 @@ client.on('message', async (topic, message) => {
 
       lastStoredTime[node] = Date.now();
 
-      // ===== ALERT =====
+      // ===== ALERT (TEMP > 30) =====
       if ((Date.now() - lastAlertTime > 300000) && avgData.temp > 30) {
 
         lastAlertTime = Date.now();
@@ -116,7 +128,7 @@ client.on('message', async (topic, message) => {
     }
 
   } catch (err) {
-    console.log(err.message);
+    console.log("❌ ERROR:", err.message);
   }
 });
 
@@ -147,11 +159,11 @@ app.get('/api/data', (req, res) => {
   const now = new Date();
   let filtered = {};
 
-  for (let node of ["node1","node2","node3"]) {
+  ["node1","node2","node3"].forEach(node=>{
     if (latestData[node] && (now - new Date(latestData[node].time)) < 120000) {
       filtered[node] = latestData[node];
     }
-  }
+  });
 
   res.json(filtered);
 });
@@ -180,15 +192,14 @@ app.get('/download', async (req, res) => {
   let rows = {};
 
   data.forEach(d => {
-    let time = new Date(d.time).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata"
-    });
+    let time = new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"});
 
     if (!rows[time]) rows[time] = { Time: time };
 
     rows[time][`${d.node}_Temp`] = d.temp;
     rows[time][`${d.node}_Hum`] = d.hum;
-    rows[time][`${d.node}_Gas`] = d.gas;
+    rows[time][`${d.node}_CO`] = d.co;
+    rows[time][`${d.node}_Methane`] = d.methane;
   });
 
   const parser = new Parser();
@@ -287,7 +298,8 @@ th, td {
         <th>Node</th>
         <th>Temp</th>
         <th>Hum</th>
-        <th>Gas</th>
+        <th>CO</th>
+        <th>Methane</th>
         <th>Time</th>
         <th>Action</th>
       </tr>
@@ -384,7 +396,8 @@ async function loadUser(){
           <div class="inner">\${d.temp}°C</div>
         </div>
         <p>💧 \${d.hum}%</p>
-        <p>💨 \${d.gas}</p>
+        <p>CO: \${d.co}</p>
+        <p>CH₄: \${d.methane}</p>
       </div>\`;
     } else {
       html+=\`
@@ -417,7 +430,8 @@ async function loadAdmin(){
         <td>\${d.node}</td>
         <td>\${d.temp}</td>
         <td>\${d.hum}</td>
-        <td>\${d.gas}</td>
+        <td>\${d.co}</td>
+        <td>\${d.methane}</td>
         <td>\${new Date(d.time).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}</td>
         <td><button onclick="del('\${d.node}')">Clear</button></td>
       </tr>\`;
@@ -425,7 +439,7 @@ async function loadAdmin(){
       html+=\`
       <tr>
         <td>\${n}</td>
-        <td colspan="4" style="color:orange;">⚠️ Node under repair</td>
+        <td colspan="5" style="color:orange;">⚠️ Node under repair</td>
         <td>-</td>
       </tr>\`;
     }
